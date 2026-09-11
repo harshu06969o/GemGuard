@@ -13,10 +13,12 @@ export const JWT_ALGORITHM = 'HS256';
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
 
 /**
- * Three Mock Personas with predefined roles, rights, and test credentials:
- * 1. officer@gem.gov.in -> PROCUREMENT_OFFICER (full override rights)
- * 2. evaluator@gem.gov.in -> TECHNICAL_EVALUATOR (read-only/review rights)
- * 3. auditor@gem.gov.in -> AUDIT_OFFICER (audit log view only)
+ * v6.0 — Five Isolated RBAC Personas (strict workspace separation, no role bleeding):
+ * 1. officer@gem.gov.in     -> PROCUREMENT_OFFICER    (tender creation, corrigendum, award sign-off)
+ * 2. evaluator@gem.gov.in   -> TECHNICAL_EVALUATOR    (OCR evidence review, connector checks)
+ * 3. financial@gem.gov.in   -> FINANCIAL_EVALUATOR    (envelope unsealing, L1 ranking, MII/MSE prefs)
+ * 4. auditor@gem.gov.in     -> AUDIT_OFFICER          (forensic read-only, chain verify, export)
+ * 5. bidder@vendor.com      -> BIDDER                 (marketplace, sealed upload, self-check)
  */
 export const MOCK_PERSONAS = {
   'officer@gem.gov.in': {
@@ -26,7 +28,7 @@ export const MOCK_PERSONAS = {
     name: 'Procurement Officer (CPCL)',
     role: 'PROCUREMENT_OFFICER',
     department: 'CPCL Procurement',
-    rights: 'full override rights',
+    rights: 'Tender creation, corrigendum, award sign-off. Time-Blinded until closing.',
     permissions: [
       'FULL_OVERRIDE',
       'APPROVE_BID',
@@ -46,15 +48,33 @@ export const MOCK_PERSONAS = {
     name: 'Technical Evaluator (CPCL)',
     role: 'TECHNICAL_EVALUATOR',
     department: 'Technical Evaluation Committee',
-    rights: 'read-only/review rights',
+    rights: 'OCR evidence review, connector checks, clarification triggers. No financial packets.',
     permissions: [
       'READ',
       'REVIEW_BID',
       'VIEW_EVIDENCE',
       'VIEW_TRACE',
       'ADD_REVIEW_NOTE',
+      'SEEK_CLARIFICATION',
     ],
     passwords: ['Eval@123', 'evaluator', 'Evaluator@123', 'Admin@123', 'Password@123', 'gemguard'],
+  },
+  'financial@gem.gov.in': {
+    id: 'financial@gem.gov.in',
+    username: 'financial@gem.gov.in',
+    email: 'financial@gem.gov.in',
+    name: 'Financial Evaluator (CPCL)',
+    role: 'FINANCIAL_EVALUATOR',
+    department: 'Finance & Accounts',
+    rights: 'Financial envelope unsealing, L1 determination, MII/MSE preference. Locked until tech PASS.',
+    permissions: [
+      'UNSEAL_FINANCIAL_ENVELOPE',
+      'VIEW_FINANCIAL_BIDS',
+      'CALCULATE_L1',
+      'APPLY_MII_MSE_PREFERENCE',
+      'VIEW_PRICE_BIDS',
+    ],
+    passwords: ['Finance@123', 'financial', 'fin', 'Admin@123', 'Password@123', 'gemguard'],
   },
   'auditor@gem.gov.in': {
     id: 'auditor@gem.gov.in',
@@ -63,15 +83,33 @@ export const MOCK_PERSONAS = {
     name: 'Audit Officer (CPCL)',
     role: 'AUDIT_OFFICER',
     department: 'Internal Audit',
-    rights: 'audit log view only',
+    rights: 'Forensic read-only. Chain integrity check. CVC/CAG dossier export.',
     permissions: [
       'VIEW_AUDIT_LOG',
       'VIEW_AUDIT_TRAIL',
       'EXPORT_AUDIT_REPORT',
+      'VERIFY_HASH_CHAIN',
       'VIEW_TRACE',
       'READ_ONLY',
     ],
     passwords: ['Audit@123', 'audit', 'auditor', 'Admin@123', 'Password@123', 'gemguard'],
+  },
+  'bidder@vendor.com': {
+    id: 'bidder@vendor.com',
+    username: 'bidder@vendor.com',
+    email: 'bidder@vendor.com',
+    name: 'Bharat Engineering & Industrial Ltd',
+    role: 'BIDDER',
+    department: 'Vendor / Supplier',
+    rights: 'Marketplace search, pre-submission dry-run, Two-Envelope sealed upload. Own data only.',
+    permissions: [
+      'VIEW_TENDERS',
+      'SUBMIT_BID',
+      'UPLOAD_DOCUMENTS',
+      'PRE_SUBMISSION_CHECK',
+      'VIEW_OWN_BIDS',
+    ],
+    passwords: ['Bidder@123', 'bidder', 'vendor', 'Admin@123', 'Password@123', 'gemguard'],
   },
 };
 

@@ -1,1073 +1,384 @@
 /**
- * BidWorkspacePage — Stage 3 + Stage 4 (Pure JavaScript)
+ * BidWorkspacePage — TECHNICAL_EVALUATOR only
+ *
+ * Owns:
+ *  - Bid compliance matrix table (all bids, status, risk band, score)
+ *  - "Run Evaluation" trigger per bid
+ *  - Rule-level result breakdown (which rules PASS/FAIL/REVIEW per bid)
+ *  - Link: "View Full Evidence →" navigates to /compliance?bidId=xxx
+ *
+ * Does NOT contain:
+ *  ✗ Document upload zone  (→ /my-bids for bidders)
+ *  ✗ Evidence inspector  (→ /compliance)
+ *  ✗ Government connector logs  (→ /compliance)
+ *  ✗ Officer override actions  (→ /dashboard)
+ *  ✗ Financial data  (→ /financial)
+ *  ✗ Audit chain  (→ /audit)
  */
 
-import { Fragment, useEffect, useRef, useState } from 'react';
-import {
-  listBids,
-  listBidDocuments,
-  listBidEvidence,
-  uploadBidderDocument,
-  getBidDocument,
-  runVerification,
-  listVerifications,
-} from '../api/client';
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { listBids, evaluateBid, listTenders } from '../api/client';
 
-function fmtDate(s) {
-  if (!s) return '—';
-  return new Date(s).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
-}
+// ─── Fallback benchmark data ──────────────────────────────────────────────────
+const FALLBACK_BIDS = [
+  {
+    id: 'bid_001', bidder_code: 'A', bidder_name: 'Bharat Piping & Infrastructure Ltd',
+    bidder: { name: 'Bharat Piping & Infrastructure Ltd', gstin: '33AAACB6666L1ZP', pan: 'AAACB6666L', turnover_cr: 24.50, local_content_pct: 82.0, ca_udin: '24058912AAAAAA9812' },
+    overall_status: 'PASS', compliance_status: 'COMPLIANT', risk_band: 'LOW', readiness_score: 98,
+    evaluation_results: [
+      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'PASS', explanation: '₹24.50 Cr ≥ ₹10.00 Cr requirement.' },
+      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'PASS', explanation: '82.0% ≥ 50.0% Class-I threshold.' },
+      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'PASS', explanation: 'All statutory registrations active and cross-matched.' },
+      { rule_id: 'REQ-MSME-04', metric: 'udyam_msme_verified', status: 'PASS', explanation: 'UDYAM-TN-01-0033333 verified on MSME portal.' },
+    ],
+    verifications: [
+      { source: 'GSTN', status: 'PASS', message: 'Active entity' },
+      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN verified' },
+      { source: 'ICAI_UDIN', status: 'PASS', message: 'CA UDIN validated' },
+    ],
+  },
+  {
+    id: 'bid_002', bidder_code: 'B', bidder_name: 'Falcon Heavy Works Private Limited',
+    bidder: { name: 'Falcon Heavy Works Private Limited', gstin: '07AAACF5678K1ZP', pan: 'AAACF5678K', turnover_cr: 8.40, local_content_pct: 61.0, ca_udin: '24058912BBBBBB5678' },
+    overall_status: 'FAIL', compliance_status: 'NON_COMPLIANT', risk_band: 'CRITICAL', readiness_score: 41,
+    shortfall_details: 'Turnover ₹8.40 Cr < mandatory ₹10.00 Cr (Deficit: ₹1.60 Cr)',
+    evaluation_results: [
+      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'FAIL', explanation: '₹8.40 Cr < ₹10.00 Cr mandatory threshold (deficit ₹1.60 Cr).' },
+      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'PASS', explanation: '61.0% ≥ 50.0% Class-I threshold.' },
+      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'PASS', explanation: 'GST and PAN active.' },
+    ],
+    verifications: [
+      { source: 'GSTN', status: 'PASS', message: 'Active entity' },
+      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN verified' },
+      { source: 'ICAI_UDIN', status: 'FAIL', message: 'Turnover shortfall — UDIN noted' },
+    ],
+  },
+  {
+    id: 'bid_003', bidder_code: 'C', bidder_name: 'Apex Buildtech & Engineering Consortium',
+    bidder: { name: 'Apex Buildtech & Engineering Consortium', gstin: '27AABCA9999M1ZQ', pan: 'AABCA9999M', turnover_cr: 18.50, local_content_pct: 48.0, ca_udin: '24058912CCCCCC3456' },
+    overall_status: 'REVIEW', compliance_status: 'UNDER_REVIEW', risk_band: 'HIGH', readiness_score: 68,
+    contradiction_details: 'PAN name "APEX INFRASTRUCTURE PVT LTD" ≠ GST name "APEX BUILDTECH LIMITED" (64% similarity)',
+    evaluation_results: [
+      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'PASS', explanation: '₹18.50 Cr ≥ ₹10.00 Cr.' },
+      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'REVIEW', explanation: '48.0% < 50.0% Class-I threshold — flagged.' },
+      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'REVIEW', explanation: 'Entity name mismatch across PAN and GST documents.' },
+    ],
+    verifications: [
+      { source: 'GSTN', status: 'PASS', message: 'Active entity' },
+      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN verified' },
+      { source: 'CROSS_DOC', status: 'REVIEW', message: 'Name mismatch detected' },
+    ],
+  },
+  {
+    id: 'bid_004', bidder_code: 'D', bidder_name: 'Hindustan Industrial Piping Systems',
+    bidder: { name: 'Hindustan Industrial Piping Systems', gstin: '06AAACH7777J1ZQ', pan: 'AAACH7777J', turnover_cr: 12.80, local_content_pct: 71.0, ca_udin: '24077777DDDDDD7777' },
+    overall_status: 'PENDING', compliance_status: 'PENDING_VERIFICATION', risk_band: 'LOW', readiness_score: 75,
+    pending_details: 'GSTN registry connection timed out (HTTP 504). Held PENDING — zero wrongful disqualification.',
+    evaluation_results: [
+      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'PASS', explanation: '₹12.80 Cr ≥ ₹10.00 Cr.' },
+      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'PASS', explanation: '71.0% ≥ 50.0%.' },
+      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'PENDING', explanation: 'GSTN gateway response timed out. Held PENDING.' },
+    ],
+    verifications: [
+      { source: 'GSTN', status: 'PENDING', message: 'Registry response delayed' },
+      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN valid' },
+      { source: 'UDYAM', status: 'PASS', message: 'MSME verified' },
+    ],
+  },
+];
 
-const DOC_TYPE_COLOR = {
-  CA_CERTIFICATE:    '#7c3aed',
-  GST_CERTIFICATE:   '#0e7490',
-  UDYAM_CERTIFICATE: '#16a34a',
-  PAN:               '#b45309',
-  OTHER:             '#475569',
-  UNKNOWN:           '#94a3b8',
+const STATUS_STYLE = {
+  PASS:        { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  COMPLIANT:   { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  FAIL:        { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  NON_COMPLIANT: { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  REVIEW:      { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  UNDER_REVIEW:{ bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  PENDING:     { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  PENDING_VERIFICATION: { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  CRITICAL:    { bg: '#fdf4ff', color: '#7e22ce', border: '#d8b4fe' },
+  HIGH:        { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  LOW:         { bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
+  MEDIUM:      { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
 };
 
-const FIELD_LABEL = {
-  turnover_avg_3fy:         'Turnover (Avg. 3FY)',
-  gst_registration_status:  'GST Status',
-  udyam_registration_status:'Udyam Status',
-  udyam_number:             'Udyam Number',
-  legal_entity_name:        'Legal Entity Name',
-  certificate_issue_date:   'Issue Date',
-  certificate_expiry_date:  'Expiry Date',
-  gstin:                    'GSTIN',
-};
-
-const STATUS_COLORS = {
-  UNVERIFIED:       { bg: '#f1f5f9', color: '#475569' },
-  VERIFIED:         { bg: '#dcfce7', color: '#16a34a' },
-  REVIEW:           { bg: '#fef3c7', color: '#92400e' },
-  MANUAL_REQUIRED:  { bg: '#fef2f2', color: '#dc2626' },
-};
-
-const PIPELINE_STATUS_COLORS = {
-  PROCESSED: { bg: '#dcfce7', color: '#16a34a' },
-  FAILED:    { bg: '#fef2f2', color: '#dc2626' },
-  PENDING:   { bg: '#fef3c7', color: '#92400e' },
-};
-
-function StatusBadge2({ status }) {
-  const c = STATUS_COLORS[status] ?? { bg: '#f1f5f9', color: '#64748b' };
+function Pill({ status }) {
+  const s = STATUS_STYLE[status] || { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' };
   return (
     <span style={{
-      fontSize: 10, fontWeight: 700, letterSpacing: '0.06em',
-      background: c.bg, color: c.color,
-      padding: '2px 7px', borderRadius: 3,
-    }}>
-      {status ? status.replace('_', ' ') : '—'}
-    </span>
-  );
-}
-
-function PipelineBadge({ status }) {
-  const c = PIPELINE_STATUS_COLORS[status] ?? { bg: '#f1f5f9', color: '#64748b' };
-  return (
-    <span style={{
-      fontSize: 10, fontWeight: 700,
-      background: c.bg, color: c.color,
-      padding: '2px 8px', borderRadius: 3,
-    }}>
-      {status}
-    </span>
-  );
-}
-
-function DocTypeBadge({ value }) {
-  if (!value) return <span style={{ color: '#94a3b8', fontSize: 10 }}>UNKNOWN</span>;
-  const c = DOC_TYPE_COLOR[value] ?? '#475569';
-  return (
-    <span style={{
-      fontSize: 10, fontWeight: 700,
-      color: c, background: c + '15',
-      padding: '2px 8px', borderRadius: 3,
-      letterSpacing: '0.05em',
-    }}>
-      {value.replace(/_/g, ' ')}
-    </span>
-  );
-}
-
-function ConfidenceBar({ value }) {
-  if (value == null) return <span style={{ color: '#94a3b8', fontSize: 10 }}>—</span>;
-  const pct = Math.round(value * 100);
-  const color = value >= 0.8 ? '#16a34a' : value >= 0.6 ? '#d97706' : '#dc2626';
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 120 }}>
-      <div style={{ flex: 1, background: '#e2e8f0', borderRadius: 99, height: 5, overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: color, transition: 'width 0.3s' }} />
-      </div>
-      <span style={{ fontSize: 11, color, fontWeight: 700, minWidth: 32 }}>{pct}%</span>
-    </div>
-  );
-}
-
-function EvidenceDetailPanel({ ev, onClose }) {
-  const fieldLabel = FIELD_LABEL[ev.field] ?? ev.field;
-
-  return (
-    <tr>
-      <td colSpan={6} style={{ padding: 0, background: '#f8fafc', borderBottom: '2px solid #1e3a5f' }}>
-        <div style={{ padding: '20px 24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <div>
-              <span style={{ fontSize: 13, fontWeight: 700, color: '#1e3a5f' }}>
-                Evidence Detail
-              </span>
-              <span style={{ marginLeft: 10, fontSize: 11, color: '#64748b' }}>
-                ID #{ev.id}
-              </span>
-            </div>
-            <button
-              id="btn-close-evidence-detail"
-              onClick={onClose}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: '#94a3b8' }}
-            >
-              ✕
-            </button>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-            <div>
-              <SectionHeader>Source Evidence</SectionHeader>
-              <DetailGrid>
-                <DetailRow label="Document" value={`Document #${ev.document_id}`} />
-                <DetailRow label="Page" value={ev.source_page != null ? `Page ${ev.source_page}` : '—'} />
-                <DetailRow label="Field" value={fieldLabel} />
-                <DetailRow label="Extraction Method" value={ev.extraction_method ?? '—'} mono />
-                <DetailRow label="Extracted" value={fmtDate(ev.extracted_at)} />
-              </DetailGrid>
-
-              {ev.source_snippet && (
-                <div style={{ marginTop: 14 }}>
-                  <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
-                    Source Text Snippet
-                  </div>
-                  <div style={{
-                    background: '#fffbeb', border: '1px solid #fcd34d', borderLeft: '3px solid #f59e0b',
-                    borderRadius: 4, padding: '10px 12px', fontSize: 11,
-                    lineHeight: 1.7, color: '#1e293b', fontStyle: 'italic',
-                    maxHeight: 120, overflowY: 'auto',
-                  }}>
-                    &ldquo;{ev.source_snippet}&rdquo;
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div>
-              <SectionHeader>Extracted Values</SectionHeader>
-              <DetailGrid>
-                <DetailRow label="Raw Value" value={ev.raw_value} />
-                <DetailRow label="Normalized Value" value={ev.normalized_value} mono />
-                <DetailRow label="Verification Status">
-                  <StatusBadge2 status={ev.verification_status} />
-                </DetailRow>
-              </DetailGrid>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>
-                  Extraction Confidence (quality of text read — NOT compliance result)
-                </div>
-                <ConfidenceBar value={ev.confidence} />
-                <div style={{ fontSize: 10, color: '#64748b', marginTop: 6 }}>
-                  {ev.confidence != null && ev.confidence < 0.6
-                    ? '⚠ Low confidence — officer should verify manually'
-                    : ev.confidence != null && ev.confidence < 0.8
-                    ? '⚡ Moderate confidence — cross-check recommended'
-                    : '✓ High extraction confidence'}
-                </div>
-              </div>
-
-              <div style={{
-                marginTop: 14, padding: '8px 12px',
-                background: '#eff6ff', border: '1px solid #bfdbfe',
-                borderRadius: 4, fontSize: 11, color: '#1d4ed8',
-                lineHeight: 1.5,
-              }}>
-                <strong>Note:</strong> This confidence score reflects how accurately the value was
-                read from the document. Compliance status (PASS/FAIL/REVIEW) is determined
-                separately by the rules engine, not by this score.
-              </div>
-            </div>
-          </div>
-        </div>
-      </td>
-    </tr>
-  );
-}
-
-function SectionHeader({ children }) {
-  return (
-    <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-      {children}
-    </div>
-  );
-}
-
-function DetailGrid({ children }) {
-  return <div style={{ display: 'grid', gap: 8 }}>{children}</div>;
-}
-
-function DetailRow({ label, value, children, mono = false }) {
-  return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-      <span style={{ minWidth: 130, fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.07em', paddingTop: 1 }}>
-        {label}
-      </span>
-      <span style={{ fontSize: 12, fontFamily: mono ? 'monospace' : undefined, color: '#1e293b', wordBreak: 'break-all' }}>
-        {children ?? (value || '—')}
-      </span>
-    </div>
-  );
-}
-
-function EvidenceInspector({
-  bidId,
-  documents,
-}) {
-  const [evidence, setEvidence] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [expandedId, setExpandedId] = useState(null);
-  const [filterField, setFilterField] = useState('ALL');
-  const [filterDoc, setFilterDoc] = useState('ALL');
-
-  useEffect(() => {
-    setLoading(true);
-    listBidEvidence(bidId)
-      .then(setEvidence)
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [bidId]);
-
-  const fields = ['ALL', ...Array.from(new Set(evidence.map(e => e.field)))];
-  const filtered = evidence.filter(e => {
-    if (filterField !== 'ALL' && e.field !== filterField) return false;
-    if (filterDoc !== 'ALL' && e.document_id !== filterDoc) return false;
-    return true;
-  });
-
-  const docMap = Object.fromEntries(documents.map(d => [d.id, d]));
-
-  return (
-    <div className="card">
-      <div style={{ padding: '14px 18px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <span style={{ fontWeight: 700, fontSize: 13 }}>Evidence Inspector</span>
-          <span style={{ marginLeft: 10, fontSize: 11, background: '#eff6ff', color: '#1d4ed8', padding: '2px 8px', borderRadius: 10 }}>
-            {filtered.length} items
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <select
-            id="evidence-filter-field"
-            value={filterField}
-            onChange={e => setFilterField(e.target.value)}
-            style={{ fontSize: 11, padding: '4px 8px', border: '1px solid #e2e8f0', borderRadius: 4, color: '#1e293b' }}
-          >
-            {fields.map(f => (
-              <option key={f} value={f}>{f === 'ALL' ? 'All Fields' : (FIELD_LABEL[f] ?? f)}</option>
-            ))}
-          </select>
-          <select
-            id="evidence-filter-doc"
-            value={String(filterDoc)}
-            onChange={e => setFilterDoc(e.target.value === 'ALL' ? 'ALL' : e.target.value)}
-            style={{ fontSize: 11, padding: '4px 8px', border: '1px solid #e2e8f0', borderRadius: 4, color: '#1e293b' }}
-          >
-            <option value="ALL">All Documents</option>
-            {documents.map(d => (
-              <option key={d.id} value={d.id}>{d.original_filename ?? d.filename}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      {loading ? (
-        <div style={{ padding: 32, textAlign: 'center', color: '#94a3b8' }}>Loading evidence…</div>
-      ) : filtered.length === 0 ? (
-        <div style={{ padding: 32, textAlign: 'center', color: '#94a3b8' }}>
-          {evidence.length === 0
-            ? 'No evidence extracted yet. Upload bidder documents to extract evidence.'
-            : 'No evidence matching current filters.'
-          }
-        </div>
-      ) : (
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Field</th>
-              <th>Raw Value</th>
-              <th>Normalized</th>
-              <th>Page</th>
-              <th>Extraction Confidence</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(ev => (
-              <Fragment key={ev.id}>
-                <tr
-                  id={`ev-row-${ev.id}`}
-                  onClick={() => setExpandedId(expandedId === ev.id ? null : ev.id)}
-                  style={{
-                    cursor: 'pointer',
-                    background: expandedId === ev.id ? '#eff6ff' : undefined,
-                    borderLeft: expandedId === ev.id ? '3px solid #1e3a5f' : '3px solid transparent',
-                  }}
-                  title="Click to view full evidence detail"
-                >
-                  <td>
-                    <div style={{ fontWeight: 600, fontSize: 12 }}>
-                      {FIELD_LABEL[ev.field] ?? ev.field}
-                    </div>
-                    <div style={{ fontSize: 10, color: '#94a3b8' }}>
-                      {docMap[ev.document_id] ? (
-                        <DocTypeBadge value={docMap[ev.document_id].doc_type} />
-                      ) : `Doc #${ev.document_id}`}
-                    </div>
-                  </td>
-                  <td style={{ fontSize: 12, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {ev.raw_value ?? '—'}
-                  </td>
-                  <td style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 600, color: '#1e3a5f' }}>
-                    {ev.normalized_value ?? '—'}
-                  </td>
-                  <td style={{ fontFamily: 'monospace', fontSize: 12, color: '#64748b' }}>
-                    {ev.source_page != null ? `pg. ${ev.source_page}` : '—'}
-                  </td>
-                  <td><ConfidenceBar value={ev.confidence} /></td>
-                  <td><StatusBadge2 status={ev.verification_status} /></td>
-                </tr>
-                {expandedId === ev.id && (
-                  <EvidenceDetailPanel ev={ev} onClose={() => setExpandedId(null)} />
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      {filtered.length > 0 && (
-        <div style={{ padding: '10px 18px', fontSize: 11, color: '#94a3b8', borderTop: '1px solid #f1f5f9' }}>
-          Click any row for full detail including source text snippet.
-          Confidence reflects text extraction quality — not compliance status.
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DocumentUploadPanel({
-  bidId,
-  bidderName,
-  onUploaded,
-}) {
-  const fileRef = useRef(null);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError] = useState(null);
-  const [lastDoc, setLastDoc] = useState(null);
-  const [dragOver, setDragOver] = useState(false);
-
-  async function doUpload(file) {
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setError('Only PDF files are accepted.');
-      return;
-    }
-    setUploading(true);
-    setError(null);
-    setProgress(0);
-    try {
-      const doc = await uploadBidderDocument(bidId, file, setProgress);
-      setLastDoc(doc);
-      onUploaded(doc);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setUploading(false);
-      setProgress(0);
-    }
-  }
-
-  function handleDrop(e) {
-    e.preventDefault();
-    setDragOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) doUpload(f);
-  }
-
-  return (
-    <div className="card" style={{ marginBottom: 16 }}>
-      <div style={{ padding: '14px 18px', borderBottom: '1px solid #f1f5f9', fontWeight: 700, fontSize: 13 }}>
-        Upload Document — {bidderName}
-      </div>
-      <div style={{ padding: '16px 18px', display: 'grid', gridTemplateColumns: lastDoc ? '1fr 1fr' : '1fr', gap: 20 }}>
-        <div
-          id={`upload-zone-bid-${bidId}`}
-          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
-          onClick={() => !uploading && fileRef.current?.click()}
-          style={{
-            border: `2px dashed ${dragOver ? '#1e3a5f' : '#cbd5e1'}`,
-            borderRadius: 6, padding: '24px 16px', textAlign: 'center',
-            cursor: uploading ? 'wait' : 'pointer',
-            background: dragOver ? '#eff6ff' : '#f8fafc',
-            transition: 'all 0.15s ease',
-          }}
-        >
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".pdf"
-            style={{ display: 'none' }}
-            onChange={e => { const f = e.target.files?.[0]; if (f) doUpload(f); e.target.value = ''; }}
-            id={`file-input-bid-${bidId}`}
-          />
-          {uploading ? (
-            <>
-              <div style={{ fontSize: 13, fontWeight: 600, color: '#1e3a5f', marginBottom: 10 }}>
-                Uploading & Extracting…
-              </div>
-              <div style={{ background: '#e2e8f0', borderRadius: 99, height: 6, overflow: 'hidden', marginBottom: 6 }}>
-                <div style={{ width: `${progress}%`, height: '100%', background: '#1e3a5f', transition: 'width 0.2s' }} />
-              </div>
-              <div style={{ fontSize: 11, color: '#64748b' }}>{progress}% — running extraction pipeline</div>
-            </>
-          ) : (
-            <>
-              <div style={{ fontSize: 26, marginBottom: 8 }}>📄</div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: '#1e3a5f' }}>Upload Bidder Document</div>
-              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
-                CA Certificate · GST Certificate · Udyam · PAN<br />
-                Drag & drop or click · PDF only · Max 50 MB
-              </div>
-            </>
-          )}
-        </div>
-
-        {lastDoc && (
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>
-              Processing Result
-            </div>
-            <div style={{ display: 'grid', gap: 8, fontSize: 12 }}>
-              <Row label="Filename" value={lastDoc.original_filename ?? lastDoc.filename} mono />
-              <Row label="Document Type"><DocTypeBadge value={lastDoc.doc_type} /></Row>
-              <Row label="Pages" value={lastDoc.page_count ? String(lastDoc.page_count) : '—'} />
-              <Row label="Method" value={lastDoc.extraction_method ?? '—'} mono />
-              <Row label="Pipeline"><PipelineBadge status={lastDoc.pipeline_status} /></Row>
-              <Row label="Evidence Items">
-                <span style={{ fontWeight: 700, color: '#1e3a5f', fontSize: 13 }}>
-                  {lastDoc.bidder_evidence.length}
-                </span>
-                <span style={{ fontSize: 10, color: '#64748b', marginLeft: 4 }}>fields extracted</span>
-              </Row>
-            </div>
-
-            {lastDoc.pipeline_status === 'PROCESSED' && lastDoc.bidder_evidence.length > 0 && (
-              <div style={{
-                marginTop: 12, padding: '8px 12px',
-                background: '#dcfce7', border: '1px solid #86efac', borderRadius: 4,
-                fontSize: 12, color: '#15803d',
-              }}>
-                ✓ Pipeline complete. Click "Evidence Inspector" tab to inspect extracted fields.
-              </div>
-            )}
-
-            {lastDoc.pipeline_error && (
-              <div style={{
-                marginTop: 10, padding: '8px 12px',
-                background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4,
-                fontSize: 12, color: '#dc2626',
-              }}>
-                ⚠ {lastDoc.pipeline_error}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-      {error && (
-        <div style={{ margin: '0 18px 16px', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4, fontSize: 12, color: '#dc2626' }}>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Row({ label, value, children, mono = false }) {
-  return (
-    <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-      <span style={{ minWidth: 100, fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.07em' }}>{label}</span>
-      <span style={{ fontSize: 12, fontFamily: mono ? 'monospace' : undefined, color: '#1e293b' }}>
-        {children ?? (value || '—')}
-      </span>
-    </div>
-  );
-}
-
-function DocumentsList({ bidId, documents, onSelect }) {
-  async function handleClick(doc) {
-    try {
-      const full = await getBidDocument(bidId, doc.id);
-      onSelect(full);
-    } catch (_) {}
-  }
-
-  return (
-    <div className="card" style={{ marginBottom: 16 }}>
-      <div style={{ padding: '14px 18px', borderBottom: '1px solid #f1f5f9', fontWeight: 700, fontSize: 13 }}>
-        Uploaded Documents
-        <span style={{ marginLeft: 8, fontSize: 11, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 10 }}>
-          {documents.length}
-        </span>
-      </div>
-      {documents.length === 0 ? (
-        <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>
-          No documents uploaded yet.
-        </div>
-      ) : (
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Filename</th>
-              <th>Type</th>
-              <th>Pages</th>
-              <th>Method</th>
-              <th>Evidence</th>
-              <th>Pipeline</th>
-              <th>Uploaded</th>
-            </tr>
-          </thead>
-          <tbody>
-            {documents.map(d => (
-              <tr
-                key={d.id}
-                id={`doc-row-${d.id}`}
-                onClick={() => handleClick(d)}
-                style={{ cursor: 'pointer' }}
-                title="Click to view full extraction detail"
-              >
-                <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{d.original_filename ?? d.filename}</td>
-                <td><DocTypeBadge value={d.doc_type} /></td>
-                <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{d.page_count ?? '—'}</td>
-                <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#64748b' }}>{d.extraction_method ?? '—'}</td>
-                <td>
-                  <span style={{ fontWeight: 700, color: '#1e3a5f', fontSize: 13 }}>{d.evidence_count}</span>
-                  <span style={{ fontSize: 10, color: '#64748b', marginLeft: 4 }}>fields</span>
-                </td>
-                <td><PipelineBadge status={d.pipeline_status} /></td>
-                <td style={{ fontSize: 11, color: '#64748b' }}>{new Date(d.uploaded_at).toLocaleDateString('en-IN')}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
-}
-
-const CONNECTOR_STATUS_CONFIG = {
-  VERIFIED:        { icon: '✓', color: '#16a34a', bg: '#dcfce7' },
-  NOT_VERIFIED:    { icon: '✗', color: '#dc2626', bg: '#fef2f2' },
-  UNAVAILABLE:     { icon: '⏳', color: '#92400e', bg: '#fef3c7' },
-  STALE:           { icon: '⚠', color: '#d97706', bg: '#fffbeb' },
-  UNAUTHORIZED:    { icon: '🔒', color: '#7c3aed', bg: '#f5f3ff' },
-  MANUAL_REQUIRED: { icon: '👤', color: '#0e7490', bg: '#ecfeff' },
-};
-
-const HINT_CONFIG = {
-  PASS_CANDIDATE: { label: 'PASS CANDIDATE', color: '#16a34a', bg: '#dcfce7' },
-  REVIEW:         { label: 'REVIEW',         color: '#d97706', bg: '#fffbeb' },
-  PENDING:        { label: 'PENDING',        color: '#475569', bg: '#f1f5f9' },
-};
-
-const SOURCE_NAMES = {
-  GST_MOCK:   'GST Registration Portal',
-  UDYAM_MOCK: 'Udyam Registration Portal',
-  PAN_MOCK:   'Income Tax PAN Portal',
-  EPFO_MOCK:  'EPFO Member Database',
-};
-
-function ConnectorStatusBadge({ status }) {
-  const c = CONNECTOR_STATUS_CONFIG[status] ?? { icon: '?', color: '#64748b', bg: '#f1f5f9' };
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
+      display: 'inline-block', padding: '2px 9px', borderRadius: 20,
       fontSize: 11, fontWeight: 700,
-      color: c.color, background: c.bg,
-      padding: '3px 10px', borderRadius: 3,
+      background: s.bg, color: s.color, border: `1px solid ${s.border}`,
     }}>
-      {c.icon} {status ? status.replace('_', ' ') : '—'}
+      {status?.replace(/_/g, ' ')}
     </span>
   );
 }
 
-function ComplianceHintBadge({ hint }) {
-  const c = HINT_CONFIG[hint] ?? { label: hint, color: '#64748b', bg: '#f1f5f9' };
+function ScoreBar({ score }) {
+  const color = score >= 90 ? '#16a34a' : score >= 70 ? '#d97706' : score >= 50 ? '#ea580c' : '#dc2626';
   return (
-    <span style={{
-      fontSize: 11, fontWeight: 700,
-      color: c.color, background: c.bg,
-      padding: '3px 10px', borderRadius: 3,
-    }}>
-      {c.label}
-    </span>
-  );
-}
-
-function VerificationPanel({ bidId }) {
-  const [records, setRecords] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [expandedId, setExpandedId] = useState(null);
-  const [error, setError] = useState(null);
-
-  const load = (id) => {
-    setLoading(true);
-    listVerifications(id)
-      .then(setRecords)
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => { load(bidId); }, [bidId]);
-
-  async function handleRun() {
-    setRunning(true);
-    setError(null);
-    try {
-      const result = await runVerification(bidId);
-      setRecords(result);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  const unavailableCount = records.filter(r => r.connector_status === 'UNAVAILABLE').length;
-  const verifiedCount = records.filter(r => r.connector_status === 'VERIFIED').length;
-
-  return (
-    <div>
-      <div className="card" style={{ marginBottom: 16 }}>
-        <div style={{ padding: '16px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
-              Verification Connector Layer
-            </div>
-            <div style={{
-              fontSize: 10, padding: '3px 8px', display: 'inline-block', borderRadius: 3,
-              background: '#fef3c7', color: '#92400e', fontWeight: 700,
-            }}>
-              ⚡ Simulation / Authorized Adapter — NOT live government API
-            </div>
-            {records.length > 0 && (
-              <div style={{ display: 'gap', gap: 12, marginTop: 10 }}>
-                <div style={{ fontSize: 12 }}>
-                  <span style={{ fontWeight: 700, color: '#16a34a' }}>{verifiedCount}</span>
-                  <span style={{ color: '#64748b', marginLeft: 4 }}>Verified</span>
-                </div>
-                <div style={{ fontSize: 12 }}>
-                  <span style={{ fontWeight: 700, color: '#92400e' }}>{unavailableCount}</span>
-                  <span style={{ color: '#64748b', marginLeft: 4 }}>Unavailable → PENDING</span>
-                </div>
-              </div>
-            )}
-          </div>
-          <button
-            id="btn-run-verification"
-            onClick={handleRun}
-            disabled={running}
-            style={{
-              background: running ? '#94a3b8' : '#1e3a5f',
-              color: 'white', border: 'none', borderRadius: 4,
-              padding: '8px 18px', fontSize: 12, fontWeight: 700,
-              cursor: running ? 'wait' : 'pointer',
-            }}
-          >
-            {running ? '⟳ Running…' : '▶ Run Verification'}
-          </button>
-        </div>
-
-        {unavailableCount > 0 && (
-          <div style={{
-            margin: '0 18px 16px',
-            padding: '10px 14px',
-            background: '#fef3c7', border: '1px solid #fcd34d',
-            borderLeft: '4px solid #f59e0b', borderRadius: 4,
-            fontSize: 12, color: '#78350f',
-          }}>
-            <strong>⚠ Source Unavailable:</strong> {unavailableCount} verification source(s) could not be reached.{' '}
-            Compliance status for these checks is <strong>PENDING</strong> — not FAIL.{' '}
-            The system does not reject a bidder because of source downtime.
-            Officer should retry when the source is restored.
-          </div>
-        )}
-
-        {error && (
-          <div style={{ margin: '0 18px 16px', padding: '8px 12px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 4, fontSize: 12, color: '#dc2626' }}>
-            {error}
-          </div>
-        )}
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ flex: 1, background: '#e2e8f0', borderRadius: 99, height: 6, overflow: 'hidden', minWidth: 60 }}>
+        <div style={{ width: `${score}%`, height: '100%', background: color, transition: 'width 0.4s' }} />
       </div>
-
-      <div className="card">
-        <div style={{ padding: '12px 18px', borderBottom: '1px solid #f1f5f9', fontWeight: 700, fontSize: 12 }}>
-          Verification Results
-          <span style={{ marginLeft: 8, fontSize: 11, background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: 10 }}>
-            {records.length} sources
-          </span>
-        </div>
-
-        {loading ? (
-          <div style={{ padding: 32, textAlign: 'center', color: '#94a3b8' }}>
-            {records.length === 0 ? 'No verification run yet. Click "Run Verification" to start.' : 'Loading…'}
-          </div>
-        ) : records.length === 0 ? (
-          <div style={{ padding: 32, textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>
-            No verification records. Click <strong>▶ Run Verification</strong> to check all sources.
-          </div>
-        ) : (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Verification Source</th>
-                <th>Source Label</th>
-                <th>Connector Status</th>
-                <th>Compliance State</th>
-                <th>Checked At</th>
-                <th>Retries</th>
-                <th>Fresh</th>
-              </tr>
-            </thead>
-            <tbody>
-              {records.map(rec => (
-                <Fragment key={rec.id}>
-                  <tr
-                    id={`vr-row-${rec.id}`}
-                    onClick={() => setExpandedId(expandedId === rec.id ? null : rec.id)}
-                    style={{
-                      cursor: 'pointer',
-                      background: expandedId === rec.id ? '#eff6ff' : (rec.connector_status === 'UNAVAILABLE' ? '#fffbeb' : undefined),
-                      borderLeft: expandedId === rec.id ? '3px solid #1e3a5f' : '3px solid transparent',
-                    }}
-                    title="Click to view detail"
-                  >
-                    <td>
-                      <div style={{ fontWeight: 600, fontSize: 12 }}>
-                        {SOURCE_NAMES[rec.source] ?? rec.source}
-                      </div>
-                      <div style={{ fontSize: 10, color: '#94a3b8', fontFamily: 'monospace' }}>{rec.source}</div>
-                    </td>
-                    <td>
-                      <span style={{
-                        fontSize: 10, fontWeight: 700,
-                        color: '#92400e', background: '#fef3c7',
-                        padding: '2px 6px', borderRadius: 3,
-                      }}>
-                        {rec.source_label}
-                      </span>
-                    </td>
-                    <td><ConnectorStatusBadge status={rec.connector_status} /></td>
-                    <td><ComplianceHintBadge hint={rec.compliance_hint} /></td>
-                    <td style={{ fontSize: 11, color: '#64748b' }}>
-                      {new Date(rec.checked_at).toLocaleTimeString('en-IN')}
-                    </td>
-                    <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{rec.retry_count}</td>
-                    <td>
-                      {rec.is_fresh
-                        ? <span style={{ color: '#16a34a', fontSize: 11 }}>✓</span>
-                        : <span style={{ color: '#dc2626', fontSize: 11 }}>✗</span>}
-                    </td>
-                  </tr>
-
-                  {expandedId === rec.id && (
-                    <tr key={`${rec.id}-detail`}>
-                      <td colSpan={7} style={{ padding: 0, background: '#f8fafc', borderBottom: '2px solid #1e3a5f' }}>
-                        <div style={{ padding: '18px 24px' }}>
-                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
-                            <div>
-                              <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-                                Request Metadata
-                              </div>
-                              <div style={{ display: 'grid', gap: 7, fontSize: 12 }}>
-                                <VRow label="Request ID" value={rec.request_id} mono />
-                                <VRow label="Source" value={`${SOURCE_NAMES[rec.source] ?? rec.source} (${rec.source})`} />
-                                <VRow label="Source Label" value={rec.source_label} />
-                                <VRow label="Checked At" value={new Date(rec.checked_at).toLocaleString('en-IN')} />
-                                <VRow label="Retry Count" value={String(rec.retry_count)} />
-                                <VRow label="Raw Hash" value={rec.raw_hash ?? '—'} mono />
-                                <VRow label="Simulated">
-                                  <span style={{ fontSize: 10, fontWeight: 700, background: '#fef3c7', color: '#92400e', padding: '2px 6px', borderRadius: 3 }}>
-                                    {rec.simulated ? 'YES — Simulation / Authorized Adapter' : 'NO'}
-                                  </span>
-                                </VRow>
-                              </div>
-                            </div>
-                            <div>
-                              <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-                                Verification Result
-                              </div>
-                              <div style={{ display: 'grid', gap: 7, fontSize: 12, marginBottom: 14 }}>
-                                <VRow label="Connector Status"><ConnectorStatusBadge status={rec.connector_status} /></VRow>
-                                <VRow label="Compliance State"><ComplianceHintBadge hint={rec.compliance_hint} /></VRow>
-                                <VRow label="Freshness" value={rec.is_fresh ? 'Fresh' : 'Stale'} />
-                              </div>
-
-                              {rec.message && (
-                                <div style={{
-                                  padding: '8px 12px', borderRadius: 4,
-                                  background: rec.connector_status === 'UNAVAILABLE' ? '#fef3c7' : '#f0fdf4',
-                                  border: `1px solid ${rec.connector_status === 'UNAVAILABLE' ? '#fcd34d' : '#86efac'}`,
-                                  fontSize: 11, lineHeight: 1.6,
-                                  color: rec.connector_status === 'UNAVAILABLE' ? '#78350f' : '#15803d',
-                                }}>
-                                  {rec.message}
-                                </div>
-                              )}
-
-                              {rec.fields_verified && Object.keys(rec.fields_verified).length > 0 && (
-                                <div style={{ marginTop: 12 }}>
-                                  <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>
-                                    Fields Verified
-                                  </div>
-                                  <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 4, overflow: 'hidden' }}>
-                                    {Object.entries(rec.fields_verified).map(([k, v]) => (
-                                      <div key={k} style={{ display: 'flex', padding: '5px 10px', borderBottom: '1px solid #f1f5f9' }}>
-                                        <span style={{ minWidth: 160, fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{k}</span>
-                                        <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#1e293b' }}>{String(v)}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {records.length > 0 && (
-          <div style={{ padding: '10px 18px', fontSize: 11, color: '#94a3b8', borderTop: '1px solid #f1f5f9' }}>
-            Click any row to view detail including request ID and verified fields.
-            Compliance State is a hint only — final status is set by the rules engine.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function VRow({ label, value, children, mono = false }) {
-  return (
-    <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-      <span style={{ minWidth: 110, fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.07em', paddingTop: 1 }}>{label}</span>
-      <span style={{ fontSize: 11, fontFamily: mono ? 'monospace' : undefined, color: '#1e293b', wordBreak: 'break-all' }}>
-        {children ?? (value || '—')}
-      </span>
+      <span style={{ fontSize: 12, fontWeight: 700, color, minWidth: 32 }}>{score}</span>
     </div>
   );
 }
 
 export default function BidWorkspacePage() {
-  const [bids, setBids] = useState([]);
-  const [selectedBid, setSelectedBid] = useState(null);
-  const [documents, setDocuments] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [docsLoading, setDocsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('upload');
+  const navigate = useNavigate();
+  const [bids, setBids] = useState(FALLBACK_BIDS);
+  const [tender, setTender] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [evaluating, setEvaluating] = useState({});
+  const [expandedBid, setExpandedBid] = useState(null);
+  const [banner, setBanner] = useState(null);
 
-  useEffect(() => {
-    listBids()
-      .then(b => {
-        setBids(b);
-        if (b.length > 0) setSelectedBid(b[0]);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
+  useEffect(() => { loadData(); }, []);
 
-  useEffect(() => {
-    if (!selectedBid) return;
-    setDocsLoading(true);
-    listBidDocuments(selectedBid.id)
-      .then(setDocuments)
-      .catch(() => {})
-      .finally(() => setDocsLoading(false));
-  }, [selectedBid]);
-
-  function handleUploaded(doc) {
-    const listItem = {
-      id: doc.id,
-      bid_id: doc.bid_id,
-      bid_package_id: doc.bid_package_id,
-      filename: doc.filename,
-      original_filename: doc.original_filename,
-      doc_type: doc.doc_type,
-      doc_type_confidence: doc.doc_type_confidence ?? null,
-      page_count: doc.page_count,
-      extraction_method: doc.extraction_method,
-      pipeline_status: doc.pipeline_status,
-      uploaded_at: doc.uploaded_at,
-      processed_at: doc.processed_at ?? null,
-      evidence_count: doc.bidder_evidence ? doc.bidder_evidence.length : 0,
-    };
-    setDocuments(prev => [listItem, ...prev]);
-    if (doc.bidder_evidence && doc.bidder_evidence.length > 0) setActiveTab('inspector');
+  async function loadData() {
+    setLoading(true);
+    try {
+      const [remoteBids, remoteTenders] = await Promise.allSettled([listBids(), listTenders()]);
+      if (remoteBids.status === 'fulfilled') {
+        const list = remoteBids.value?.bids || remoteBids.value || [];
+        if (Array.isArray(list) && list.length > 0) setBids(list);
+      }
+      if (remoteTenders.status === 'fulfilled') {
+        const list = remoteTenders.value?.tenders || remoteTenders.value || [];
+        if (Array.isArray(list) && list.length > 0) setTender(list[0]);
+      }
+    } finally {
+      setLoading(false);
+    }
   }
 
-  const bidderDisplayName = (bid) => {
-    const name = bid.bidder?.name ?? `Bid #${bid.id}`;
-    return name.split('—')[1]?.trim() ?? name;
-  };
-
-  if (loading) {
-    return (
-      <div className="page-layout">
-        <div className="page-content" style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
-          <div style={{ color: '#64748b' }}>Loading bids…</div>
-        </div>
-      </div>
-    );
+  async function runEval(bid) {
+    setEvaluating(prev => ({ ...prev, [bid.id]: true }));
+    setBanner(null);
+    try {
+      const result = await evaluateBid(bid.id).catch(() => null);
+      if (result) {
+        setBids(prev => prev.map(b => b.id === bid.id
+          ? { ...b, ...result, overall_status: result.overall_status || b.overall_status }
+          : b
+        ));
+        setBanner({ type: 'success', msg: `✓ Evaluation complete for ${bid.bidder?.name || bid.bidder_name}: ${result.overall_status}` });
+      } else {
+        setBanner({ type: 'warning', msg: `Offline mode: evaluation not committed. Current status shown from fallback data.` });
+      }
+    } catch {
+      setBanner({ type: 'error', msg: 'Evaluation failed.' });
+    } finally {
+      setEvaluating(prev => ({ ...prev, [bid.id]: false }));
+    }
   }
+
+  const total = bids.length;
+  const passCount = bids.filter(b => ['PASS', 'COMPLIANT'].includes(b.overall_status || b.compliance_status)).length;
+  const failCount = bids.filter(b => ['FAIL', 'NON_COMPLIANT'].includes(b.overall_status || b.compliance_status)).length;
+  const reviewCount = bids.filter(b => ['REVIEW', 'UNDER_REVIEW'].includes(b.overall_status || b.compliance_status)).length;
 
   return (
-    <div className="page-layout">
-      <div className="sidebar">
-        <div style={{ padding: '12px 14px', borderBottom: '1px solid #2d4a6e' }}>
-          <div style={{ fontSize: 9, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
-            Bid Workspace
-          </div>
-          <div style={{ fontSize: 11, fontWeight: 700, color: '#e2e8f0' }}>Document &amp; Verification</div>
-          <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>GEM/2026/B/4521001</div>
-        </div>
+    <div style={{ minHeight: 'calc(100vh - 54px)', background: '#f8fafc', fontFamily: "'Inter', sans-serif", padding: '24px 28px', maxWidth: 1400, margin: '0 auto' }}>
 
-        <div style={{ padding: '8px 6px', borderBottom: '1px solid #2d4a6e' }}>
-          <div style={{ fontSize: 9, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.1em', padding: '4px 8px', marginBottom: 2 }}>
-            Bidders ({bids.length})
-          </div>
-          {bids.map(bid => (
-            <button
-              key={bid.id}
-              id={`sidebar-bid-${bid.id}`}
-              className={`sidebar-item${selectedBid?.id === bid.id ? ' active' : ''}`}
-              style={{ width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', background: 'none' }}
-              onClick={() => { setSelectedBid(bid); setActiveTab('upload'); }}
-            >
-              <div style={{ fontSize: 11, fontWeight: 600, lineHeight: 1.3 }}>
-                {bidderDisplayName(bid)}
-              </div>
-              <div style={{ fontSize: 9, color: '#94a3b8', fontFamily: 'monospace', marginTop: 2 }}>
-                {bid.bidder?.gstin ?? 'No GSTIN'}
-              </div>
-              {bid.bidder?.gstin === '33AABNE5678F1ZQ' && (
-                <div style={{ fontSize: 9, color: '#f59e0b', marginTop: 2 }}>⏳ Timeout Demo</div>
-              )}
-            </button>
-          ))}
+      {/* ─── Header ─────────────────────────────────────────────────────────── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '20px 24px', marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <span style={{ fontSize: 10, fontWeight: 800, padding: '3px 10px', borderRadius: 6, background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', letterSpacing: '0.06em' }}>
+            🔵 TECHNICAL EVALUATOR
+          </span>
+          <h1 style={{ margin: '6px 0 2px', fontSize: 22, fontWeight: 800, color: '#0f172a' }}>Bid Compliance Matrix</h1>
+          <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+            {tender ? `${tender.reference_number || tender.title}` : 'GEM/2026/B/4521001 · CPCL Refinery Modernization'}
+            {' '}· {total} bids evaluated
+          </p>
         </div>
-
-        {selectedBid && (
-          <div style={{ padding: '8px 6px' }}>
-            <div style={{ fontSize: 9, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.1em', padding: '4px 8px', marginBottom: 2 }}>
-              View
-            </div>
-            <button
-              id="tab-upload"
-              className={`sidebar-item${activeTab === 'upload' ? ' active' : ''}`}
-              style={{ width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', background: 'none' }}
-              onClick={() => setActiveTab('upload')}
-            >
-              <span style={{ marginRight: 6 }}>📤</span> Upload Documents
-            </button>
-            <button
-              id="tab-inspector"
-              className={`sidebar-item${activeTab === 'inspector' ? ' active' : ''}`}
-              style={{ width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', background: 'none' }}
-              onClick={() => setActiveTab('inspector')}
-            >
-              <span style={{ marginRight: 6 }}>🔍</span>
-              Evidence Inspector
-              {documents.length > 0 && (
-                <span style={{ float: 'right', fontSize: 10, background: '#2d4a6e', padding: '1px 5px', borderRadius: 8 }}>
-                  {documents.reduce((s, d) => s + (d.evidence_count ?? 0), 0)}
-                </span>
-              )}
-            </button>
-            <button
-              id="tab-verification"
-              className={`sidebar-item${activeTab === 'verification' ? ' active' : ''}`}
-              style={{ width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', background: 'none' }}
-              onClick={() => setActiveTab('verification')}
-            >
-              <span style={{ marginRight: 6 }}>🔐</span>
-              Verification
-              {selectedBid.bidder?.gstin === '33AABNE5678F1ZQ' && (
-                <span style={{ float: 'right', fontSize: 9, background: '#fcd34d', color: '#78350f', padding: '1px 5px', borderRadius: 8 }}>
-                  TIMEOUT
-                </span>
-              )}
-            </button>
-          </div>
-        )}
+        <button onClick={loadData} disabled={loading}
+          style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 12, cursor: 'pointer' }}>
+          {loading ? '⏳' : '🔄'} Refresh
+        </button>
       </div>
 
-      <div className="page-content">
-        {!selectedBid ? (
-          <div style={{ textAlign: 'center', paddingTop: 60, color: '#94a3b8' }}>
-            Select a bidder from the sidebar to begin.
-          </div>
-        ) : (
-          <>
-            <div style={{ marginBottom: 20 }}>
-              <h1 className="page-title">{bidderDisplayName(selectedBid)}</h1>
-              <p className="page-subtitle">
-                {selectedBid.bidder?.gstin ?? ''} · Bid #{selectedBid.id} · Stage 3+4 — Document &amp; Verification
-              </p>
+      {/* ─── Banner ──────────────────────────────────────────────────────────── */}
+      {banner && (
+        <div style={{
+          marginBottom: 20, padding: '12px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          background: banner.type === 'success' ? '#dcfce7' : banner.type === 'warning' ? '#fffbeb' : '#fee2e2',
+          color: banner.type === 'success' ? '#166534' : banner.type === 'warning' ? '#92400e' : '#991b1b',
+          border: `1px solid ${banner.type === 'success' ? '#86efac' : banner.type === 'warning' ? '#fde68a' : '#fca5a5'}`,
+        }}>
+          {banner.msg}
+          <button onClick={() => setBanner(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 18 }}>×</button>
+        </div>
+      )}
+
+      {/* ─── KPI Cards ───────────────────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+        {[
+          { label: 'Total Bids', value: total, color: '#1e3a8a', bg: '#eff6ff', border: '#bfdbfe', icon: '📦' },
+          { label: 'Compliant', value: passCount, color: '#166534', bg: '#dcfce7', border: '#86efac', icon: '✓' },
+          { label: 'Require Review', value: reviewCount, color: '#92400e', bg: '#fffbeb', border: '#fde68a', icon: '⚠️' },
+          { label: 'Non-Compliant', value: failCount, color: '#991b1b', bg: '#fee2e2', border: '#fca5a5', icon: '✗' },
+        ].map(k => (
+          <div key={k.label} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '18px 20px', display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ width: 44, height: 44, borderRadius: 10, background: k.bg, border: `1px solid ${k.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
+              {k.icon}
             </div>
+            <div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: k.color, lineHeight: 1 }}>{k.value}</div>
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>{k.label}</div>
+            </div>
+          </div>
+        ))}
+      </div>
 
-            {activeTab === 'upload' && (
-              <>
-                <DocumentUploadPanel
-                  bidId={selectedBid.id}
-                  bidderName={bidderDisplayName(selectedBid)}
-                  onUploaded={handleUploaded}
-                />
-                {docsLoading ? (
-                  <div style={{ color: '#94a3b8', fontSize: 12 }}>Loading documents…</div>
-                ) : (
-                  <DocumentsList
-                    bidId={selectedBid.id}
-                    documents={documents}
-                    onSelect={() => setActiveTab('inspector')}
-                  />
-                )}
-              </>
-            )}
+      {/* ─── Bid Matrix Table ─────────────────────────────────────────────────── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9' }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>Compliance Evaluation Matrix</div>
+          <div style={{ fontSize: 12, color: '#64748b' }}>Click any row to expand rule-level results · Click "View Evidence" for full compliance trace</div>
+        </div>
 
-            {activeTab === 'inspector' && (
-              <EvidenceInspector bidId={selectedBid.id} documents={documents} />
-            )}
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #f1f5f9', background: '#f8fafc' }}>
+                {['Code', 'Bidder', 'GSTIN', 'Turnover', 'MII %', 'Score', 'Status', 'Risk', 'Actions'].map(h => (
+                  <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#64748b', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {bids.map((b, i) => {
+                const isExpanded = expandedBid === b.id;
+                const status = b.overall_status || b.compliance_status;
+                return (
+                  <>
+                    <tr
+                      key={b.id}
+                      style={{ borderBottom: '1px solid #f1f5f9', background: isExpanded ? '#f0f9ff' : (i % 2 === 0 ? '#fff' : '#fafafa'), cursor: 'pointer' }}
+                      onClick={() => setExpandedBid(isExpanded ? null : b.id)}
+                    >
+                      <td style={{ padding: '12px 14px', fontWeight: 800, color: '#1e3a8a', fontSize: 14 }}>{b.bidder_code}</td>
+                      <td style={{ padding: '12px 14px' }}>
+                        <div style={{ fontWeight: 700, color: '#0f172a' }}>{b.bidder?.name || b.bidder_name}</div>
+                        <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', marginTop: 2 }}>PAN: {b.bidder?.pan || '—'}</div>
+                      </td>
+                      <td style={{ padding: '12px 14px', fontFamily: 'monospace', fontSize: 11, color: '#475569' }}>{b.bidder?.gstin || '—'}</td>
+                      <td style={{ padding: '12px 14px', fontWeight: 700, color: (b.bidder?.turnover_cr || 0) >= 10 ? '#166534' : '#b91c1c' }}>
+                        ₹{(b.bidder?.turnover_cr || 0).toFixed(1)} Cr
+                      </td>
+                      <td style={{ padding: '12px 14px', fontWeight: 700, color: (b.bidder?.local_content_pct || 0) >= 50 ? '#166534' : '#b91c1c' }}>
+                        {(b.bidder?.local_content_pct || 0).toFixed(1)}%
+                      </td>
+                      <td style={{ padding: '12px 14px', minWidth: 120 }}>
+                        <ScoreBar score={b.readiness_score || 0} />
+                      </td>
+                      <td style={{ padding: '12px 14px' }}><Pill status={status} /></td>
+                      <td style={{ padding: '12px 14px' }}><Pill status={b.risk_band || 'LOW'} /></td>
+                      <td style={{ padding: '12px 14px' }}>
+                        <div style={{ display: 'flex', gap: 6 }} onClick={e => e.stopPropagation()}>
+                          <button
+                            onClick={() => runEval(b)}
+                            disabled={evaluating[b.id]}
+                            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#1d4ed8', fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                          >
+                            {evaluating[b.id] ? '⏳ Running…' : '▶ Evaluate'}
+                          </button>
+                          <button
+                            onClick={() => navigate(`/compliance?bidId=${b.id}`)}
+                            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#475569', fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                          >
+                            View Evidence →
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
 
-            {activeTab === 'verification' && (
-              <VerificationPanel bidId={selectedBid.id} />
-            )}
-          </>
-        )}
+                    {/* ─── Expanded Rule-Level Results ─── */}
+                    {isExpanded && (
+                      <tr key={`${b.id}-expanded`}>
+                        <td colSpan={9} style={{ padding: 0, background: '#f0f9ff', borderBottom: '2px solid #bfdbfe' }}>
+                          <div style={{ padding: '16px 20px' }}>
+                            <div style={{ fontSize: 12, fontWeight: 800, color: '#1e3a8a', marginBottom: 12 }}>
+                              Rule-Level Results for {b.bidder?.name || b.bidder_name}
+                            </div>
+
+                            {/* Rule results */}
+                            {(b.evaluation_results || []).length > 0 ? (
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10, marginBottom: 14 }}>
+                                {(b.evaluation_results || []).map(r => (
+                                  <div key={r.rule_id} style={{
+                                    background: '#fff', border: `1px solid ${STATUS_STYLE[r.status]?.border || '#e2e8f0'}`,
+                                    borderLeft: `3px solid ${STATUS_STYLE[r.status]?.color || '#64748b'}`,
+                                    borderRadius: 8, padding: '10px 14px',
+                                  }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                                      <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 700, color: '#1e3a8a' }}>{r.rule_id}</span>
+                                      <Pill status={r.status} />
+                                    </div>
+                                    <div style={{ fontSize: 11, color: '#475569' }}>{r.explanation}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 12 }}>No evaluation results yet — click ▶ Evaluate to run compliance check.</div>
+                            )}
+
+                            {/* Verifications */}
+                            {(b.verifications || []).length > 0 && (
+                              <div style={{ marginBottom: 12 }}>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Government Registry Connectors</div>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                  {(b.verifications || []).map(v => (
+                                    <span key={v.source} style={{
+                                      padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+                                      background: STATUS_STYLE[v.status]?.bg || '#f1f5f9',
+                                      color: STATUS_STYLE[v.status]?.color || '#475569',
+                                      border: `1px solid ${STATUS_STYLE[v.status]?.border || '#cbd5e1'}`,
+                                    }}>
+                                      {v.source}: {v.status} · {v.message}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Flag / issue note */}
+                            {(b.shortfall_details || b.contradiction_details || b.pending_details) && (
+                              <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderLeft: '3px solid #d97706', borderRadius: 6, padding: '8px 12px', fontSize: 12, color: '#92400e' }}>
+                                ⚠️ {b.shortfall_details || b.contradiction_details || b.pending_details}
+                              </div>
+                            )}
+
+                            <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+                              <button
+                                onClick={() => navigate(`/compliance?bidId=${b.id}`)}
+                                style={{ padding: '8px 16px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg, #1e3a8a, #2563eb)', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+                              >
+                                View Full Evidence & Compliance Trace →
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ─── Zero-LLM Notice ─────────────────────────────────────────────────── */}
+      <div style={{ marginTop: 16, padding: '10px 16px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, fontSize: 11, color: '#166534', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>🛡️</span>
+        <span><strong>Zero-LLM Evaluation:</strong> All PASS/FAIL/REVIEW decisions are computed by deterministic Pandas/Boolean rules engine. AI is used only for document entity extraction. Officers make all final decisions.</span>
       </div>
     </div>
   );

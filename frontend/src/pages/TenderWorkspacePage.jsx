@@ -23,9 +23,9 @@ export const DEFAULT_CPCL_TENDER = {
   title: 'CPCL Manali Refinery Modernization & High-Pressure Hydrocracker Piping System',
   organization: 'Chennai Petroleum Corporation Limited (CPCL)',
   buyer: 'CPCL / Ministry of Petroleum and Natural Gas (MoPNG)',
-  authority: 'CPCL / MoPNG · Government of India',
+  authority: 'CPCL / MoPNG Â· Government of India',
   estimated_value_cr: 48.50,
-  estimated_value: '₹ 48,50,00,000',
+  estimated_value: 'â‚¹ 48,50,00,000',
   closing_date: '2026-10-28T17:00:00.000Z',
   submission_deadline: '2026-10-28T17:00:00.000Z',
   status: 'ACTIVE',
@@ -48,12 +48,12 @@ export const DEFAULT_CPCL_TENDER = {
       id: 'rule-01',
       requirement_id: 'REQ-FIN-01',
       clause_id: 'Clause 3.1.2',
-      clause_reference: 'Section III · Financial Eligibility',
-      clause_text: 'The average annual financial turnover of the bidder during the last 3 financial years, ending on 31st March 2024, must be at least ₹10.00 Crores (INR Ten Crores), certified by a Chartered Accountant with valid ICAI UDIN.',
+      clause_reference: 'Section III Â· Financial Eligibility',
+      clause_text: 'The average annual financial turnover of the bidder during the last 3 financial years, ending on 31st March 2024, must be at least â‚¹10.00 Crores (INR Ten Crores), certified by a Chartered Accountant with valid ICAI UDIN.',
       metric: 'annual_turnover_cr',
       operator: 'GTE',
       threshold_value: '10.0',
-      threshold_unit: '₹ Cr',
+      threshold_unit: 'â‚¹ Cr',
       category: 'FINANCIAL',
       severity: 'CRITICAL',
       is_mandatory: true,
@@ -66,7 +66,7 @@ export const DEFAULT_CPCL_TENDER = {
       id: 'rule-02',
       requirement_id: 'REQ-MII-02',
       clause_id: 'Clause 4.2.1',
-      clause_reference: 'Section IV · Public Procurement (Make in India) Order 2017',
+      clause_reference: 'Section IV Â· Public Procurement (Make in India) Order 2017',
       clause_text: 'Only Class-I Local Suppliers with local domestic value addition equal to or exceeding 50.0% shall be eligible. Bidders must furnish a statutory auditor / cost auditor declaration specifying domestic manufacturing location.',
       metric: 'local_content_percentage',
       operator: 'GTE',
@@ -84,7 +84,7 @@ export const DEFAULT_CPCL_TENDER = {
       id: 'rule-03',
       requirement_id: 'REQ-STAT-03',
       clause_id: 'Clause 5.1.1',
-      clause_reference: 'Section V · Statutory Registration Compliance',
+      clause_reference: 'Section V Â· Statutory Registration Compliance',
       clause_text: 'Bidder must possess active and valid GSTIN registration in the operating state and Permanent Account Number (PAN). Legal entity names must match 100% without contradictions across all statutory filings.',
       metric: 'gstin_and_pan_active',
       operator: 'VALID',
@@ -102,7 +102,7 @@ export const DEFAULT_CPCL_TENDER = {
       id: 'rule-04',
       requirement_id: 'REQ-MSME-04',
       clause_id: 'Clause 5.2.4',
-      clause_reference: 'Section V · Public Procurement Policy for MSEs Order 2012',
+      clause_reference: 'Section V Â· Public Procurement Policy for MSEs Order 2012',
       clause_text: 'Micro & Small Enterprises (MSEs) seeking exemption from prior turnover and experience must provide a valid Udyam Registration Certificate verified against the Ministry of MSME portal.',
       metric: 'udyam_msme_verified',
       operator: 'VALID',
@@ -120,7 +120,7 @@ export const DEFAULT_CPCL_TENDER = {
       id: 'rule-05',
       requirement_id: 'REQ-TECH-05',
       clause_id: 'Clause 6.4.1',
-      clause_reference: 'Section VI · Technical Specification & ASME B31.3 Standard',
+      clause_reference: 'Section VI Â· Technical Specification & ASME B31.3 Standard',
       clause_text: 'Bidder must demonstrate prior execution of high-pressure cryogenic piping or hydrocracker installation in an operating oil refinery exceeding 3 years of continuous operation.',
       metric: 'technical_past_experience_years',
       operator: 'GTE',
@@ -142,9 +142,7 @@ export default function TenderWorkspacePage() {
   const navigate = useNavigate();
 
   const [tender, setTender] = useState(DEFAULT_CPCL_TENDER);
-  const [bids, setBids] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
   // Upload & Compilation state
   const [uploading, setUploading] = useState(false);
@@ -157,12 +155,6 @@ export default function TenderWorkspacePage() {
 
   // PDF Preview Modal
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
-
-  // Rule Edit / Corrigendum Modal
-  const [editingRule, setEditingRule] = useState(null);
-  const [editedThreshold, setEditedThreshold] = useState('');
-  const [corrigendumReason, setCorrigendumReason] = useState('');
-  const [corrigendumSaving, setCorrigendumSaving] = useState(false);
 
   useEffect(() => {
     loadTenderData();
@@ -181,10 +173,7 @@ export default function TenderWorkspacePage() {
       }
 
       if (id) {
-        const [t, b] = await Promise.all([
-          getTender(id).catch(() => null),
-          getTenderBids(id).catch(() => []),
-        ]);
+        const t = await getTender(id).catch(() => null);
         if (t) {
           setTender({
             ...DEFAULT_CPCL_TENDER,
@@ -194,7 +183,6 @@ export default function TenderWorkspacePage() {
               : DEFAULT_CPCL_TENDER.requirement_rules,
           });
         }
-        if (b && b.length > 0) setBids(b);
       }
     } catch {
       // Guaranteed non-blank fallback
@@ -261,11 +249,11 @@ export default function TenderWorkspacePage() {
             ...(prev.documents || []),
           ],
         }));
-        setUploadSuccessMsg(`✓ Successfully parsed ${file.name}: SHA-256 verified and ${compiledRules.length || 5} deterministic rules compiled!`);
+        setUploadSuccessMsg(`âœ“ Successfully parsed ${file.name}: SHA-256 verified and ${compiledRules.length || 5} deterministic rules compiled!`);
       } else {
         // Mock fallback simulation if Gateway/Backend is offline
         await new Promise(r => setTimeout(r, 500));
-        setUploadSuccessMsg(`✓ Offline Mode: Analyzed ${file.name} — Extracted 5 clauses & compiled deterministic rules.`);
+        setUploadSuccessMsg(`âœ“ Offline Mode: Analyzed ${file.name} â€” Extracted 5 clauses & compiled deterministic rules.`);
       }
       setUploadProgress(100);
     } catch (err) {
@@ -288,59 +276,7 @@ export default function TenderWorkspacePage() {
     }
   }
 
-  // Handle Editing a Rule (Corrigendum tweak)
-  function openEditRuleModal(rule) {
-    setEditingRule(rule);
-    setEditedThreshold(rule.threshold_value || '');
-    setCorrigendumReason(`Clarification issued pursuant to pre-bid technical query for ${rule.clause_id}.`);
-  }
-
-  async function handleSaveRuleCorrigendum() {
-    if (!editingRule || !editedThreshold) return;
-    setCorrigendumSaving(true);
-    try {
-      // 1. Post to Corrigendum API
-      const res = await fetch(`/api/v1/tenders/${tender.id || 'tnd_cpcl_001'}/corrigendum`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}`,
-        },
-        body: JSON.stringify({
-          metric: editingRule.metric,
-          new_threshold: editedThreshold,
-          operator: editingRule.operator || '>=',
-          clause_id: editingRule.clause_id,
-          reason: corrigendumReason,
-          actor: localStorage.getItem('user_name') || 'officer@cpcl.gov.in',
-        }),
-      }).catch(() => null);
-
-      // 2. Update rule locally
-      setTender(prev => ({
-        ...prev,
-        requirement_rules: prev.requirement_rules.map(r => {
-          if (r.id === editingRule.id || r.metric === editingRule.metric) {
-            return {
-              ...r,
-              threshold_value: editedThreshold,
-              clause_text: `${r.clause_text} [AMENDED via Corrigendum: Threshold adjusted to ${editedThreshold} ${r.threshold_unit || ''}]`,
-              status: 'AMENDED_BY_CORRIGENDUM',
-            };
-          }
-          return r;
-        }),
-      }));
-
-      setUploadSuccessMsg(`✓ Corrigendum amendment saved for ${editingRule.clause_id}: New threshold ${editedThreshold} ${editingRule.threshold_unit || ''} logged to SHA-256 audit chain!`);
-      setEditingRule(null);
-      setTimeout(() => setUploadSuccessMsg(null), 5000);
-    } catch {
-      alert('Could not synchronize corrigendum with backend.');
-    } finally {
-      setCorrigendumSaving(false);
-    }
-  }
+  // Rule editing removed â€” use /corrigendum page for threshold amendments
 
   return (
     <div style={{
@@ -350,7 +286,7 @@ export default function TenderWorkspacePage() {
       display: 'flex',
       flexDirection: 'column',
     }}>
-      {/* ── WORKSPACE TITLE BAR ─────────────────────────────────────────── */}
+      {/* â”€â”€ WORKSPACE TITLE BAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div style={{
         background: '#ffffff',
         borderBottom: '1px solid #e2e8f0',
@@ -377,7 +313,7 @@ export default function TenderWorkspacePage() {
               Active Procurement Tender Workspace
             </span>
             <span style={{ fontSize: 12, fontWeight: 700, color: '#16a34a', display: 'flex', alignItems: 'center', gap: 4 }}>
-              ● {tender.status || 'ACTIVE'}
+              â— {tender.status || 'ACTIVE'}
             </span>
           </div>
 
@@ -387,10 +323,10 @@ export default function TenderWorkspacePage() {
 
           <div style={{ fontSize: 12, color: '#64748b', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
             <span>Tender Ref: <strong style={{ color: '#1e3a8a', fontFamily: 'monospace' }}>{tender.reference_number || tender.tender_no}</strong></span>
-            <span>·</span>
+            <span>Â·</span>
             <span>Authority: <strong style={{ color: '#334155' }}>{tender.authority || tender.organization}</strong></span>
-            <span>·</span>
-            <span>Estimated Value: <strong style={{ color: '#059669' }}>{tender.estimated_value || `₹ ${tender.turnover_threshold_cr || 48.5} Cr`}</strong></span>
+            <span>Â·</span>
+            <span>Estimated Value: <strong style={{ color: '#059669' }}>{tender.estimated_value || `â‚¹ ${tender.turnover_threshold_cr || 48.5} Cr`}</strong></span>
           </div>
         </div>
 
@@ -442,7 +378,7 @@ export default function TenderWorkspacePage() {
         </div>
       </div>
 
-      {/* ── NOTIFICATION BANNERS ────────────────────────────────────────── */}
+      {/* â”€â”€ NOTIFICATION BANNERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {uploadSuccessMsg && (
         <div style={{
           background: '#dcfce7',
@@ -477,7 +413,7 @@ export default function TenderWorkspacePage() {
         </div>
       )}
 
-      {/* ── 2-COLUMN MAIN WORKSPACE ─────────────────────────────────────── */}
+      {/* â”€â”€ 2-COLUMN MAIN WORKSPACE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div style={{
         flex: 1,
         maxWidth: 1400,
@@ -489,7 +425,7 @@ export default function TenderWorkspacePage() {
         gap: 24,
       }}>
 
-        {/* ── LEFT PANEL: ACTIVE TENDER OVERVIEW & DROPZONE ─────────────── */}
+        {/* â”€â”€ LEFT PANEL: ACTIVE TENDER OVERVIEW & DROPZONE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           
           {/* Active Tender Overview Card */}
@@ -510,7 +446,7 @@ export default function TenderWorkspacePage() {
                 <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px' }}>
                   <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Est. Value</div>
                   <div style={{ fontSize: 13, fontWeight: 800, color: '#059669', marginTop: 2 }}>
-                    ₹ 48.50 Cr
+                    â‚¹ 48.50 Cr
                   </div>
                 </div>
 
@@ -604,7 +540,7 @@ export default function TenderWorkspacePage() {
                     <LoadingSpinner />
                   </div>
                   <div style={{ fontSize: 13, fontWeight: 800, color: '#1e3a8a', marginBottom: 6 }}>
-                    Ingesting Tender Document…
+                    Ingesting Tender Documentâ€¦
                   </div>
 
                   {/* 3-Stage Processing Tracker */}
@@ -617,7 +553,7 @@ export default function TenderWorkspacePage() {
                       alignItems: 'center',
                       gap: 6,
                     }}>
-                      <span>{uploadStage === 'HASHING' ? '⏳' : '✓'}</span>
+                      <span>{uploadStage === 'HASHING' ? 'â³' : 'âœ“'}</span>
                       <span>1. Hashing PDF (SHA-256 cryptographic fingerprint)</span>
                     </div>
 
@@ -629,7 +565,7 @@ export default function TenderWorkspacePage() {
                       alignItems: 'center',
                       gap: 6,
                     }}>
-                      <span>{uploadStage === 'EXTRACTING' ? '⏳' : (uploadStage === 'COMPILING' ? '✓' : '○')}</span>
+                      <span>{uploadStage === 'EXTRACTING' ? 'â³' : (uploadStage === 'COMPILING' ? 'âœ“' : 'â—‹')}</span>
                       <span>2. Extracting Clauses (PyMuPDF Layout & Table Parser)</span>
                     </div>
 
@@ -641,7 +577,7 @@ export default function TenderWorkspacePage() {
                       alignItems: 'center',
                       gap: 6,
                     }}>
-                      <span>{uploadStage === 'COMPILING' ? '⏳' : '○'}</span>
+                      <span>{uploadStage === 'COMPILING' ? 'â³' : 'â—‹'}</span>
                       <span>3. Compiling Deterministic Rules (Zero Hallucination)</span>
                     </div>
                   </div>
@@ -680,7 +616,7 @@ export default function TenderWorkspacePage() {
                       padding: '3px 8px',
                       borderRadius: 4,
                     }}>
-                      PDF Only · Max 50 MB
+                      PDF Only Â· Max 50 MB
                     </span>
                   </div>
                 </>
@@ -689,7 +625,7 @@ export default function TenderWorkspacePage() {
           </div>
         </div>
 
-        {/* ── RIGHT PANEL: COMPILED REQUIREMENTS RULE MATRIX ───────────── */}
+        {/* â”€â”€ RIGHT PANEL: COMPILED REQUIREMENTS RULE MATRIX â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
         <div>
           <div className="card">
             <div style={{
@@ -859,28 +795,22 @@ export default function TenderWorkspacePage() {
                         </span>
                       </td>
 
-                      {/* Actions: Edit Rule (Triggers Corrigendum) */}
+                      {/* Actions: Link to Corrigendum page for amendments */}
                       <td style={{ textAlign: 'right' }}>
                         <button
-                          id={`btn-edit-rule-${(r.id || r.metric).toLowerCase()}`}
-                          onClick={() => openEditRuleModal(r)}
+                          onClick={() => navigate('/corrigendum')}
                           style={{
-                            background: '#ffffff',
-                            border: '1px solid #bfdbfe',
-                            color: '#2563eb',
+                            background: '#f8fafc',
+                            border: '1px solid #e2e8f0',
+                            color: '#64748b',
                             padding: '4px 10px',
                             borderRadius: 5,
                             fontSize: 11,
                             fontWeight: 700,
                             cursor: 'pointer',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 4,
-                            boxShadow: '0 1px 2px rgba(37,99,235,0.06)',
                           }}
                         >
-                          <Edit3 size={12} />
-                          <span>Edit Rule</span>
+                          Amend via Corrigendum â†’
                         </button>
                       </td>
                     </tr>
@@ -893,7 +823,7 @@ export default function TenderWorkspacePage() {
 
       </div>
 
-      {/* ── SOURCE TENDER PDF PREVIEW MODAL ─────────────────────────────── */}
+      {/* â”€â”€ SOURCE TENDER PDF PREVIEW MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       {previewModalOpen && (
         <div style={{
           position: 'fixed',
@@ -931,7 +861,7 @@ export default function TenderWorkspacePage() {
             }}>
               <div>
                 <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 800, textTransform: 'uppercase' }}>
-                  Source Tender Specification Document · PyMuPDF Render
+                  Source Tender Specification Document Â· PyMuPDF Render
                 </div>
                 <h3 style={{ margin: '2px 0 0', fontSize: 16, fontWeight: 800 }}>
                   {tender.filename || 'CPCL_RFP_Modernization_2026_B_4521001.pdf'}
@@ -941,7 +871,7 @@ export default function TenderWorkspacePage() {
                 onClick={() => setPreviewModalOpen(false)}
                 style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}
               >
-                ✕
+                âœ•
               </button>
             </div>
 
@@ -957,9 +887,9 @@ export default function TenderWorkspacePage() {
               }}>
                 <div style={{ textAlign: 'center', borderBottom: '2px solid #0f172a', paddingBottom: 16, marginBottom: 24 }}>
                   <h2 style={{ margin: 0, fontSize: 18, color: '#0f172a' }}>CHENNAI PETROLEUM CORPORATION LIMITED</h2>
-                  <div style={{ fontSize: 12, color: '#475569', fontWeight: 600 }}>A Government of India Enterprise · Manali, Chennai 600068</div>
+                  <div style={{ fontSize: 12, color: '#475569', fontWeight: 600 }}>A Government of India Enterprise Â· Manali, Chennai 600068</div>
                   <div style={{ fontSize: 12, fontWeight: 700, color: '#1e3a8a', marginTop: 4 }}>
-                    INVITATION FOR BIDS (IFB) · GeM Bid Ref: {tender.reference_number}
+                    INVITATION FOR BIDS (IFB) Â· GeM Bid Ref: {tender.reference_number}
                   </div>
                 </div>
 
@@ -1010,118 +940,6 @@ export default function TenderWorkspacePage() {
         </div>
       )}
 
-      {/* ── EDIT RULE / CORRIGENDUM TRIGGER MODAL ───────────────────────── */}
-      {editingRule && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0,0,0,0.65)',
-          backdropFilter: 'blur(3px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999,
-          padding: 24,
-        }}>
-          <div style={{
-            background: '#ffffff',
-            borderRadius: 12,
-            width: '100%',
-            maxWidth: 520,
-            padding: 24,
-            boxShadow: '0 20px 40px rgba(0,0,0,0.25)',
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
-              <div>
-                <span style={{ fontSize: 10, fontWeight: 800, color: '#2563eb', background: '#eff6ff', padding: '2px 8px', borderRadius: 4 }}>
-                  CORRIGENDUM AMENDMENT TRIGGER
-                </span>
-                <h3 style={{ margin: '4px 0 0', fontSize: 17, fontWeight: 800, color: '#0f172a' }}>
-                  Edit Tender Rule: {editingRule.clause_id}
-                </h3>
-              </div>
-              <button
-                onClick={() => setEditingRule(null)}
-                style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 18, cursor: 'pointer' }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                Target Metric:
-              </label>
-              <input
-                type="text"
-                disabled
-                value={editingRule.metric}
-                style={{ width: '100%', padding: '8px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc' }}
-              />
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', display: 'block', marginBottom: 4 }}>
-                * Amended Threshold Value ({editingRule.threshold_unit || ''}):
-              </label>
-              <input
-                type="text"
-                value={editedThreshold}
-                onChange={e => setEditedThreshold(e.target.value)}
-                placeholder="e.g. 10.0"
-                style={{ width: '100%', padding: '8px 10px', fontSize: 13, fontWeight: 700, borderRadius: 6, border: '1px solid #2563eb', outline: 'none' }}
-              />
-              <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
-                Current baseline: <strong>{editingRule.threshold_value} {editingRule.threshold_unit || ''}</strong>
-              </div>
-            </div>
-
-            <div style={{ marginBottom: 18 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', display: 'block', marginBottom: 4 }}>
-                Official Corrigendum Reason / Pre-Bid Reference:
-              </label>
-              <textarea
-                rows={3}
-                value={corrigendumReason}
-                onChange={e => setCorrigendumReason(e.target.value)}
-                style={{ width: '100%', padding: '8px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #cbd5e1', outline: 'none' }}
-              />
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              <button
-                onClick={() => setEditingRule(null)}
-                style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px 16px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
-              >
-                Cancel
-              </button>
-              <button
-                id="btn-confirm-save-corrigendum"
-                onClick={handleSaveRuleCorrigendum}
-                disabled={corrigendumSaving || !editedThreshold}
-                style={{
-                  background: 'linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)',
-                  color: '#fff',
-                  border: 'none',
-                  padding: '8px 18px',
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 800,
-                  cursor: corrigendumSaving ? 'wait' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                }}
-              >
-                {corrigendumSaving ? 'Updating & Chaining…' : 'Issue Corrigendum & Re-evaluate'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

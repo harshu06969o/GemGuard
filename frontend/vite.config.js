@@ -27,14 +27,17 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: backendTarget,
           changeOrigin: true,
+          secure: false,
         },
         '/auth': {
           target: backendTarget,
           changeOrigin: true,
+          secure: false,
         },
         '/health': {
           target: backendTarget,
           changeOrigin: true,
+          secure: false,
         },
       },
     },

@@ -1,14 +1,24 @@
 /**
- * Stage 6 + 7 + 8 — Compliance Dashboard
- * Officer workspace: compliance summary, evidence trace, override controls, audit timeline.
- * GeM-Guard is decision support. Officers are the accountable authority.
+ * ComplianceDashboard — TECHNICAL_EVALUATOR only
+ *
+ * Owns:
+ *  - Left sidebar: bid list with status filter (navigate between bids)
+ *  - Right panel: deep-dive for one selected bid
+ *    Tab 1 — Summary: rule-level pass/fail table
+ *    Tab 2 — Evidence Trace: clause → value → result chain
+ *    Tab 3 — Audit Log: SHA-256 events for this bid
+ *
+ * Does NOT contain:
+ *  ✗ Officer action buttons (ACCEPT/REJECT/OVERRIDE)  (→ /dashboard)
+ *  ✗ Corrigendum controls  (→ /corrigendum)
+ *  ✗ Financial data  (→ /financial)
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import ComplianceTraceView from '../components/ComplianceTraceView';
 import AuditTimelineView from '../components/AuditTimelineView';
-import OverrideModal from '../components/OverrideModal';
-import { listBids, getBid, evaluateBid, submitOfficerAction } from '../api/client';
+import { listBids, getBid, evaluateBid } from '../api/client';
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -261,7 +271,6 @@ function SummaryTable({ results, onOverride }) {
 function BidderDetail({ bid, onRefresh }) {
   const [activeTab, setActiveTab] = useState('summary');
   const [evaluating, setEvaluating] = useState(false);
-  const [overrideProps, setOverrideProps] = useState(null);
 
   const results = bid.rule_results ?? [];
   const ra = bid.risk_assessment;

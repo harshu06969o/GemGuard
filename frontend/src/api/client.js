@@ -1,8 +1,11 @@
 /**
- * GeM-Guard — API Client v3.0 (Pure JavaScript)
+ * GeM-Guard — API Client v6.0 (Pure JavaScript)
+ * All routes go through the Gateway on Port 3000.
+ * Vite proxies /api/* → localhost:3000 in dev.
  */
 
 const envUrl = import.meta.env.VITE_API_URL;
+// Vite proxy maps /api → localhost:3000, so /api/v1/* works end-to-end
 const BASE = envUrl ? envUrl.replace(/\/$/, '') : '/api';
 
 // Auth token management
@@ -38,7 +41,7 @@ async function request(path, init) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
-    const msg = body.detail ?? body.error ?? res.statusText;
+    const msg = body.detail ?? body.error ?? body.message ?? res.statusText;
     if (res.status === 401) clearToken();
     throw new ApiError(res.status, msg);
   }
@@ -65,7 +68,7 @@ async function uploadWithProgress(path, formData, onProgress) {
         resolve(JSON.parse(xhr.responseText));
       } else {
         const body = JSON.parse(xhr.responseText || '{}');
-        reject(new ApiError(xhr.status, body.detail ?? xhr.statusText));
+        reject(new ApiError(xhr.status, body.detail ?? body.error ?? xhr.statusText));
       }
     });
     xhr.addEventListener('error', () => reject(new ApiError(0, 'Network error during upload')));
@@ -99,111 +102,110 @@ export const registerBidder = async (payload) => {
 
 // ── Tenders ──────────────────────────────────────────────────────────────────
 
-export const listTenders = () => request('/tenders');
-
-export const getTender = (id) => request(`/tenders/${id}`);
-
-export const getTenderDocuments = (tenderId) =>
-  request(`/tenders/${tenderId}/documents`);
-
+export const listTenders = () => request('/v1/tenders');
+export const getTender = (id) => request(`/v1/tenders/${id}`);
+export const getTenderDocuments = (tenderId) => request(`/v1/tenders/${tenderId}/documents`);
 export const createTender = (payload) =>
-  request('/tenders', { method: 'POST', body: JSON.stringify(payload) });
-
+  request('/v1/tenders', { method: 'POST', body: JSON.stringify(payload) });
 export const updateTender = (id, payload) =>
-  request(`/tenders/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
-
+  request(`/v1/tenders/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
 export const uploadTenderDocument = (tenderId, file, onProgress) => {
   const fd = new FormData();
   fd.append('file', file);
-  return uploadWithProgress(`/tenders/${tenderId}/upload`, fd, onProgress);
+  return uploadWithProgress(`/v1/tenders/${tenderId}/upload`, fd, onProgress);
 };
-
 export const compileRequirements = (tenderId, source) =>
-  request(`/tenders/${tenderId}/compile`, { method: 'POST', body: JSON.stringify({ source }) });
-
-export const getTenderBids = (tenderId) =>
-  request(`/tenders/${tenderId}/bids`);
+  request(`/v1/tenders/${tenderId}/compile`, { method: 'POST', body: JSON.stringify({ source }) });
+export const getTenderBids = (tenderId) => request(`/v1/tenders/${tenderId}/bids`);
 
 // ── Bidders ──────────────────────────────────────────────────────────────────
 
-export const listBidders = () => request('/bidders');
-
-export const getBidder = (id) => request(`/bidders/${id}`);
-
-export const getMyProfile = () => request('/bidders/me/profile');
+export const listBidders = () => request('/v1/bidders');
+export const getBidder = (id) => request(`/v1/bidders/${id}`);
+export const getMyProfile = () => request('/v1/bidders/me/profile');
 
 // ── Bids ─────────────────────────────────────────────────────────────────────
 
-export const listBids = () => request('/bids');
-
-export const getMyBids = () => request('/bids/mine');
-
-export const getBid = (id) => request(`/bids/${id}`);
-
+export const listBids = () => request('/v1/bids');
+export const getMyBids = () => request('/v1/bids/mine');
+export const getBid = (id) => request(`/v1/bids/${id}`);
 export const submitBid = (tenderId) =>
-  request('/bids', { method: 'POST', body: JSON.stringify({ tender_id: tenderId }) });
-
+  request('/v1/bids', { method: 'POST', body: JSON.stringify({ tender_id: tenderId }) });
 export const submitOfficerAction = (bidId, payload) =>
-  request(`/bids/${bidId}/officer-action`, { method: 'POST', body: JSON.stringify(payload) });
+  request(`/v1/bids/${bidId}/officer-action`, { method: 'POST', body: JSON.stringify(payload) });
 
 // ── Bidder Documents ──────────────────────────────────────────────────────────
 
-export const listBidDocuments = (bidId) =>
-  request(`/bids/${bidId}/documents`);
-
-export const listBidEvidence = (bidId) =>
-  request(`/bids/${bidId}/evidence`);
-
-export const getBidDocument = (bidId, docId) =>
-  request(`/bids/${bidId}/documents/${docId}`);
-
+export const listBidDocuments = (bidId) => request(`/v1/bids/${bidId}/documents`);
+export const listBidEvidence = (bidId) => request(`/v1/bids/${bidId}/evidence`);
+export const getBidDocument = (bidId, docId) => request(`/v1/bids/${bidId}/documents/${docId}`);
 export const uploadBidderDocument = (bidId, file, onProgress) => {
   const fd = new FormData();
   fd.append('file', file);
-  return uploadWithProgress(`/bids/${bidId}/documents/upload`, fd, onProgress);
+  return uploadWithProgress(`/v1/bids/${bidId}/documents/upload`, fd, onProgress);
 };
 
 // ── Compliance Engine ────────────────────────────────────────────────────────
 
 export const evaluateBid = (bidId) =>
-  request(`/bids/${bidId}/evaluate`, { method: 'POST' });
+  request(`/v1/bids/${bidId}/evaluate`, { method: 'POST' });
 
 // ── Verification Connectors ───────────────────────────────────────────────────
 
-export const runVerification = (bidId) =>
-  request(`/bids/${bidId}/verify`, { method: 'POST' });
-
-export const listVerifications = (bidId) =>
-  request(`/bids/${bidId}/verifications`);
-
-export const getConnectorsHealth = () =>
-  request('/connectors/health');
+export const runVerification = (bidId) => request(`/v1/bids/${bidId}/verify`, { method: 'POST' });
+export const listVerifications = (bidId) => request(`/v1/bids/${bidId}/verifications`);
+export const getConnectorsHealth = () => request('/v1/connectors/health');
 
 // ── Trace & Audit ────────────────────────────────────────────────────────────
 
-export const getComplianceTrace = (bidId) =>
-  request(`/bids/${bidId}/trace`);
+export const getComplianceTrace = (bidId) => request(`/v1/bids/${bidId}/trace`);
+export const getAuditTimeline = (bidId) => request(`/v1/bids/${bidId}/audit`);
+export const getAuditTrail = (bidId) => request(`/v1/bids/${bidId}/audit`);
+export const getAuditReport = (bidId) => request(`/v1/bids/${bidId}/report`);
 
-export const getAuditTimeline = (bidId) =>
-  request(`/bids/${bidId}/audit`);
+// ── Full Audit Chain (AUDIT_OFFICER only) ────────────────────────────────────
 
-export const getAuditTrail = (bidId) =>
-  request(`/bids/${bidId}/audit`);
+export const getFullAuditChain = (bidId) => request(`/v1/audit/chain/${bidId}`);
+export const getAllAuditEvents = (limit = 200) => request(`/v1/audit/events?limit=${limit}`);
+export const verifyChainIntegrity = (bidId) => request(`/v1/audit/verify/${bidId}`);
+export const exportAuditDossier = (bidId) => request(`/v1/audit/export/${bidId}`);
+export const exportFullDossier = () => request('/v1/audit/export');
 
-export const getAuditReport = (bidId) =>
-  request(`/bids/${bidId}/report`);
+// ── Financial Evaluator (FINANCIAL_EVALUATOR only) ───────────────────────────
+
+export const getFinancialEnvelopes = (bidId) =>
+  request(`/v1/financial/bids/${bidId}/envelope`);
+
+export const unsealBid = (bidId, payload = {}) =>
+  request(`/v1/financial/bids/${bidId}/unseal`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+export const getL1Ranking = (tenderId) =>
+  request(`/v1/financial/tenders/${tenderId}/l1`);
+
+export const uploadFinancialEnvelope = (bidId, file, quotedPrice, miiPct, onProgress) => {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('quoted_price', String(quotedPrice));
+  fd.append('mii_local_content_pct', String(miiPct));
+  return uploadWithProgress(`/v1/financial/bids/${bidId}/envelope/upload`, fd, onProgress);
+};
 
 // ── Corrigendum ───────────────────────────────────────────────────────────────
 
 export const runCorrigendumAnalysis = (payload) =>
-  request('/corrigendum/impact-analysis', { method: 'POST', body: JSON.stringify(payload) });
+  request('/v1/corrigendum/impact-analysis', { method: 'POST', body: JSON.stringify(payload) });
 
 // ── Health ────────────────────────────────────────────────────────────────────
 
-export const getHealth = () =>
-  request('/health', { headers: {} });
+export const getHealth = () => request('/health', { headers: {} });
+
+// ── Demo Seeder ───────────────────────────────────────────────────────────────
+
+export const resetDemo = () => request('/v1/demo/reset', { method: 'POST' });
 
 // ── Users (Officer) ───────────────────────────────────────────────────────────
 
-export const listUsers = () =>
-  request('/users');
+export const listUsers = () => request('/v1/users');

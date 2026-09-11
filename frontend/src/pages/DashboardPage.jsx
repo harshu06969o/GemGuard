@@ -1,1489 +1,391 @@
-import { useEffect, useState, useMemo } from 'react';
+/**
+ * DashboardPage — PROCUREMENT_OFFICER only
+ *
+ * Owns:
+ *  - KPI summary cards (total bids, PASS / FAIL / REVIEW / PENDING counts)
+ *  - Bid status summary table (read-only overview)
+ *  - Action Queue: bids flagged FAIL/REVIEW → officer can APPROVE, SHOW-CAUSE, OVERRIDE
+ *  - Quick links to /tenders and /corrigendum
+ *
+ * Does NOT contain:
+ *  ✗ Audit SHA-256 chain  (→ /audit)
+ *  ✗ Corrigendum rule simulator  (→ /corrigendum)
+ *  ✗ Evidence / compliance trace  (→ /compliance)
+ *  ✗ Technical Evaluator or Audit Officer panels
+ *  ✗ Financial details
+ */
+
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useSelector, useDispatch } from 'react-redux';
-import { loginSuccess } from '../store/slices/authSlice';
-import {
-  listTenders,
-  listBids,
-  getHealth,
-  getMe,
-  evaluateBid,
-  getConnectorsHealth,
-  runCorrigendumAnalysis,
-} from '../api/client';
+import { useSelector } from 'react-redux';
+import { listBids, getMe, listTenders, resetDemo } from '../api/client';
 import StatusBadge from '../components/StatusBadge';
-import { LoadingSpinner, ErrorMessage } from '../components/Card';
-import SplitDocumentViewer from '../components/SplitDocumentViewer';
-import AuditReplayModal from '../components/AuditReplayModal';
-import {
-  ShieldCheck, AlertTriangle, CheckCircle2, FileText, Cpu,
-  Eye, Sliders, ExternalLink, ArrowRight, Play, RefreshCw,
-  Search, Filter, Lock, Scale, FileCheck, Layers, Hash,
-  UserCheck, AlertCircle, Clock, Check, ChevronRight
-} from 'lucide-react';
 
-// Benchmark Bidders fallback data
-export const BENCHMARK_BIDDERS = [
-  {
-    id: 'bid_001_pass',
-    bidder_code: 'A',
-    bidder_name: 'Bharat Piping & Infrastructure Ltd',
-    bidder: {
-      name: 'Bharat Piping & Infrastructure Ltd',
-      gstin: '33AABCB1234F1ZQ',
-      pan: 'AABCB1234F',
-      turnover_cr: 14.20,
-      local_content_pct: 62.5,
-      udyam_number: 'UDYAM-TN-02-0045123',
-      ca_udin: '24058912AAAAAA9812',
-    },
-    overall_status: 'PASS',
-    compliance_status: 'COMPLIANT',
-    risk_band: 'LOW',
-    readiness_score: 96,
-    evaluation_results: [
-      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'PASS', explanation: 'Average 3FY turnover ₹14.20 Cr exceeds threshold ₹10.00 Cr. ICAI UDIN verified.' },
-      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'PASS', explanation: 'Local content 62.5% exceeds Class-I requirement (50.0%). Affidavit verified.' },
-      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'PASS', explanation: 'GSTIN active in Tamil Nadu. PAN matches corporate filing 100%.' },
-    ],
-    verifications: [
-      { source: 'GSTN', status: 'PASS', message: 'Active regular taxpayer' },
-      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN verified active' },
-      { source: 'UDYAM', status: 'PASS', message: 'MSME registered' },
-      { source: 'ICAI_UDIN', status: 'PASS', message: 'UDIN verified & unrevoked' },
-    ],
-  },
-  {
-    id: 'bid_002_fail',
-    bidder_code: 'B',
-    bidder_name: 'Falcon Heavy Works Private Limited',
-    bidder: {
-      name: 'Falcon Heavy Works Private Limited',
-      gstin: '07AAACF5678K1ZP',
-      pan: 'AAACF5678K',
-      turnover_cr: 8.40,
-      local_content_pct: 54.0,
-      udyam_number: 'UDYAM-DL-05-0089234',
-      ca_udin: '24089123BBBBBB1245',
-    },
-    overall_status: 'FAIL',
-    compliance_status: 'NON_COMPLIANT',
-    risk_band: 'CRITICAL',
-    readiness_score: 42,
-    shortfall_details: 'Annual turnover ₹8.40 Cr is below mandatory requirement of ≥ ₹10.00 Cr (Shortfall: ₹1.60 Cr)',
-    evaluation_results: [
-      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'FAIL', explanation: 'Reported turnover ₹8.40 Cr fails mandatory threshold of ₹10.00 Cr.' },
-      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'PASS', explanation: 'Local content 54.0% satisfies Class-I criteria.' },
-      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'PASS', explanation: 'GSTIN & PAN active and matched.' },
-    ],
-    verifications: [
-      { source: 'GSTN', status: 'PASS', message: 'Active taxpayer' },
-      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN valid' },
-      { source: 'ICAI_UDIN', status: 'PASS', message: 'UDIN verified' },
-    ],
-  },
-  {
-    id: 'bid_003_review',
-    bidder_code: 'C',
-    bidder_name: 'Apex Buildtech & Engineering Consortium',
-    bidder: {
-      name: 'Apex Buildtech & Engineering Consortium',
-      gstin: '27AABCA9999M1ZQ',
-      pan: 'AABCA9999M',
-      turnover_cr: 18.50,
-      local_content_pct: 48.0,
-      udyam_number: 'UDYAM-MH-01-0019999',
-      ca_udin: '24019999CCCCCC9999',
-    },
-    overall_status: 'REVIEW',
-    compliance_status: 'UNDER_REVIEW',
-    risk_band: 'HIGH',
-    readiness_score: 68,
-    contradiction_details: 'PAN registered to "APEX INFRASTRUCTURE PVT LTD" whereas GST certificate states "APEX BUILDTECH LIMITED" (Entity name similarity: 64% - Flagged by Pandas cross-doc validator)',
-    integrity_findings: [
-      { discrepancy_details: 'Legal entity mismatch between Income Tax PAN database and State GST registration.' },
-      { discrepancy_details: 'Local content reported at 48.0% (borderline Class-I vs Class-II classification query).' },
-    ],
-    evaluation_results: [
-      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'PASS', explanation: 'Turnover ₹18.50 Cr meets requirement.' },
-      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'REVIEW', explanation: '48.0% local content falls short of 50.0% Class-I requirement without formal declaration.' },
-      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'REVIEW', explanation: 'Cross-document legal entity name discrepancy flagged.' },
-    ],
-    verifications: [
-      { source: 'GSTN', status: 'PASS', message: 'Active entity' },
-      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN verified' },
-      { source: 'CROSS_DOC', status: 'REVIEW', message: 'Name mismatch detected' },
-    ],
-  },
-  {
-    id: 'bid_004_pending',
-    bidder_code: 'D',
-    bidder_name: 'Hindustan Industrial Piping Systems',
-    bidder: {
-      name: 'Hindustan Industrial Piping Systems',
-      gstin: '06AAACH7777J1ZQ',
-      pan: 'AAACH7777J',
-      turnover_cr: 12.80,
-      local_content_pct: 71.0,
-      udyam_number: 'UDYAM-HR-03-0077777',
-      ca_udin: '24077777DDDDDD7777',
-    },
-    overall_status: 'PENDING',
-    compliance_status: 'PENDING_VERIFICATION',
-    risk_band: 'LOW',
-    readiness_score: 75,
-    pending_details: 'Statutory GSTN registry connection simulated network latency. Bid held at PENDING to guarantee Zero Wrongful Disqualification.',
-    evaluation_results: [
-      { rule_id: 'REQ-FIN-01', metric: 'annual_turnover_cr', status: 'PASS', explanation: 'Turnover ₹12.80 Cr meets threshold.' },
-      { rule_id: 'REQ-MII-02', metric: 'local_content_percentage', status: 'PASS', explanation: 'Local content 71.0% verified.' },
-      { rule_id: 'REQ-STAT-03', metric: 'gstin_and_pan_active', status: 'PENDING', explanation: 'GSTN gateway response timed out (HTTP 504 Simulated). Held at PENDING.' },
-    ],
-    verifications: [
-      { source: 'GSTN', status: 'PENDING', message: 'Registry response delayed (Held PENDING)' },
-      { source: 'CBDT_PAN', status: 'PASS', message: 'PAN valid' },
-      { source: 'UDYAM', status: 'PASS', message: 'MSME valid' },
-    ],
-  },
+// ─── Fallback benchmark data ──────────────────────────────────────────────────
+const FALLBACK_BIDS = [
+  { id: 'bid_001', bidder_code: 'A', bidder_name: 'Bharat Piping & Infrastructure Ltd',
+    bidder: { name: 'Bharat Piping & Infrastructure Ltd', gstin: '33AAACB6666L1ZP', turnover_cr: 24.50 },
+    overall_status: 'PASS', compliance_status: 'COMPLIANT', risk_band: 'LOW' },
+  { id: 'bid_002', bidder_code: 'B', bidder_name: 'Falcon Heavy Works Private Limited',
+    bidder: { name: 'Falcon Heavy Works Private Limited', gstin: '07AAACF5678K1ZP', turnover_cr: 8.40 },
+    overall_status: 'FAIL', compliance_status: 'NON_COMPLIANT', risk_band: 'CRITICAL',
+    shortfall_details: 'Turnover ₹8.40 Cr < mandatory ₹10.00 Cr (Deficit: ₹1.60 Cr)' },
+  { id: 'bid_003', bidder_code: 'C', bidder_name: 'Apex Buildtech & Engineering Consortium',
+    bidder: { name: 'Apex Buildtech & Engineering Consortium', gstin: '27AABCA9999M1ZQ', turnover_cr: 18.50 },
+    overall_status: 'REVIEW', compliance_status: 'UNDER_REVIEW', risk_band: 'HIGH',
+    contradiction_details: 'PAN name "APEX INFRASTRUCTURE PVT LTD" ≠ GST name "APEX BUILDTECH LIMITED" (64% similarity)' },
+  { id: 'bid_004', bidder_code: 'D', bidder_name: 'Hindustan Industrial Piping Systems',
+    bidder: { name: 'Hindustan Industrial Piping Systems', gstin: '06AAACH7777J1ZQ', turnover_cr: 12.80 },
+    overall_status: 'PENDING', compliance_status: 'PENDING_VERIFICATION', risk_band: 'LOW',
+    pending_details: 'GSTN registry response timed out. Held PENDING (never wrongfully disqualified).' },
 ];
 
-// Audit trail events for Vigilance & Audit Officer
-export const DEFAULT_AUDIT_STREAM = [
-  {
-    id: 'evt-005',
-    block_index: 5,
-    timestamp: '2026-09-11T14:15:00.000Z',
-    action: 'OFFICER_OVERRIDE',
-    actor: 'officer@cpcl.gov.in',
-    actor_role: 'PROCUREMENT_OFFICER',
-    entity_id: 'bid_002_fail',
-    prev_hash: '9a8b1c4e7f3d2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7f3d2a5c8e1b4d7f0a3c6e',
-    event_hash: '3f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a',
-    details: {
-      rule_id: 'REQ-FIN-01',
-      old_status: 'FAIL',
-      new_status: 'REVIEW',
-      justification: 'MSME statutory relaxation requested under MoPNG Circular 2024/MSME/08. Provisional review permitted pending OEM bank guarantee.',
-    },
-  },
-  {
-    id: 'evt-004',
-    block_index: 4,
-    timestamp: '2026-09-11T12:30:00.000Z',
-    action: 'RULE_EVALUATED',
-    actor: 'system.engine@gemguard.internal',
-    actor_role: 'SYSTEM_RULES_ENGINE',
-    entity_id: 'bid_003_review',
-    prev_hash: 'c4e7f3d2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7f3d2a5c8e1b4d7f0a3c6e9a8b1',
-    event_hash: '9a8b1c4e7f3d2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7f3d2a5c8e1b4d7f0a3c6e',
-    details: {
-      rules_checked: 5,
-      discrepancy: 'Entity Name Mismatch: PAN (Apex Infrastructure) vs GST (Apex Buildtech)',
-      decision: 'FLAGGED_FOR_OFFICER_REVIEW',
-    },
-  },
-  {
-    id: 'evt-003',
-    block_index: 3,
-    timestamp: '2026-09-11T11:05:00.000Z',
-    action: 'REGISTRY_CONNECTOR_VERIFIED',
-    actor: 'connectors.registry@gemguard.internal',
-    actor_role: 'GOV_CONNECTORS',
-    entity_id: 'bid_001_pass',
-    prev_hash: '3d2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7f3d2a5c8e1b4d7f0a3c6e9a8b1c4e7f',
-    event_hash: 'c4e7f3d2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7f3d2a5c8e1b4d7f0a3c6e9a8b1',
-    details: {
-      registries: ['GSTN', 'CBDT_PAN', 'UDYAM', 'ICAI_UDIN'],
-      results: '4/4 Validated Active',
-    },
-  },
-  {
-    id: 'evt-002',
-    block_index: 2,
-    timestamp: '2026-09-11T09:40:00.000Z',
-    action: 'BID_INGESTED',
-    actor: 'system.pipeline@gemguard.internal',
-    actor_role: 'SYSTEM_OCR',
-    entity_id: 'bid_001_pass',
-    prev_hash: '8f432e1a90c4bb21f37e810a9c6d4e21a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3',
-    event_hash: '3d2a5c8e1b4d7f0a3c6e9b2d5f8a1c4e7f3d2a5c8e1b4d7f0a3c6e9a8b1c4e7f',
-    details: {
-      documents_parsed: 5,
-      figures_extracted: 8,
-      bounding_boxes_mapped: 8,
-    },
-  },
-  {
-    id: 'evt-001',
-    block_index: 1,
-    timestamp: '2026-09-10T15:00:00.000Z',
-    action: 'TENDER_COMPILED',
-    actor: 'officer@cpcl.gov.in',
-    actor_role: 'PROCUREMENT_OFFICER',
-    entity_id: 'tnd_cpcl_refinery_001',
-    prev_hash: 'GENESIS_00000000000000000000000000000000000000000000000000000000',
-    event_hash: '8f432e1a90c4bb21f37e810a9c6d4e21a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3',
-    details: {
-      tender_no: 'GEM/2026/B/4521001',
-      rules_compiled: 5,
-      est_value: '₹ 48.50 Cr',
-    },
-  },
-];
+const STATUS_COLOR = {
+  PASS: { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  COMPLIANT: { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  FAIL: { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  NON_COMPLIANT: { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  REVIEW: { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  UNDER_REVIEW: { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  PENDING: { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  PENDING_VERIFICATION: { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  CRITICAL: { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  HIGH: { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  LOW: { bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
+  MEDIUM: { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+};
+
+function Pill({ status }) {
+  const s = STATUS_COLOR[status] || STATUS_COLOR['PENDING'];
+  return (
+    <span style={{
+      display: 'inline-block', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700,
+      background: s.bg, color: s.color, border: `1px solid ${s.border}`,
+    }}>{status?.replace(/_/g, ' ')}</span>
+  );
+}
 
 export default function DashboardPage() {
   const navigate = useNavigate();
-  const dispatch = useDispatch();
-  const authState = useSelector(state => state.auth);
+  const authState = useSelector(s => s.auth);
 
-  // Active Role determination
-  const activeRole = authState?.role || localStorage.getItem('role') || 'PROCUREMENT_OFFICER';
-
-  const [currentUser, setCurrentUser] = useState(authState?.user || null);
+  const [bids, setBids] = useState(FALLBACK_BIDS);
+  const [tender, setTender] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [bids, setBids] = useState(BENCHMARK_BIDDERS);
-  const [auditEvents, setAuditEvents] = useState(DEFAULT_AUDIT_STREAM);
-  const [auditFilterOnlyOverrides, setAuditFilterOnlyOverrides] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [banner, setBanner] = useState(null);
 
-  // Action Center State
-  const [actionSuccessMsg, setActionSuccessMsg] = useState(null);
-  const [actionErrorMsg, setActionErrorMsg] = useState(null);
+  // Override modal state
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideBid, setOverrideBid] = useState(null);
+  const [overrideJust, setOverrideJust] = useState('');
+  const [overrideStatus, setOverrideStatus] = useState('REVIEW');
 
-  // Modal Controls
-  const [splitViewerOpen, setSplitViewerOpen] = useState(false);
-  const [auditReplayOpen, setAuditReplayOpen] = useState(false);
-  const [overrideModalOpen, setOverrideModalOpen] = useState(false);
-  const [selectedBidForAction, setSelectedBidForAction] = useState(null);
-  const [overrideJustification, setOverrideJustification] = useState('');
-  const [overrideTargetStatus, setOverrideTargetStatus] = useState('PASS');
-
-  // Corrigendum Quick-Trigger Simulation state
-  const [corrigendumMetric, setCorrigendumMetric] = useState('annual_turnover_cr');
-  const [simulatedThreshold, setSimulatedThreshold] = useState('8.0');
-  const [corrigendumSimulating, setCorrigendumSimulating] = useState(false);
-  const [corrigendumSimResult, setCorrigendumSimResult] = useState(null);
-
-  useEffect(() => {
-    loadData();
-    const handlePersona = () => loadData();
-    window.addEventListener('gemguard:persona_changed', handlePersona);
-    window.addEventListener('gemguard:demo_reset', handlePersona);
-    return () => {
-      window.removeEventListener('gemguard:persona_changed', handlePersona);
-      window.removeEventListener('gemguard:demo_reset', handlePersona);
-    };
-  }, [activeRole]);
+  useEffect(() => { loadData(); }, []);
 
   async function loadData() {
+    setLoading(true);
     try {
-      const [remoteBids, me, remoteAudit] = await Promise.all([
-        listBids().catch(() => []),
-        getMe().catch(() => null),
-        fetch('/api/v1/audit').then(r => r.json()).catch(() => null),
+      const [remoteBids, remoteTenders] = await Promise.allSettled([
+        listBids(),
+        listTenders(),
       ]);
-      if (me) setCurrentUser(me);
-      if (remoteBids && remoteBids.length > 0) {
-        setBids(remoteBids);
+      if (remoteBids.status === 'fulfilled') {
+        const list = remoteBids.value?.bids || remoteBids.value || [];
+        if (Array.isArray(list) && list.length > 0) setBids(list);
       }
-      if (remoteAudit && Array.isArray(remoteAudit) && remoteAudit.length > 0) {
-        setAuditEvents(remoteAudit);
+      if (remoteTenders.status === 'fulfilled') {
+        const list = remoteTenders.value?.tenders || remoteTenders.value || [];
+        if (Array.isArray(list) && list.length > 0) setTender(list[0]);
       }
-    } catch {
-      // Fallback already initialized
+    } finally {
+      setLoading(false);
     }
   }
 
-  // Handle Quick Persona Switching inside Dashboard
-  function switchRoleInline(newRole, email, name) {
-    dispatch(loginSuccess({
-      token: localStorage.getItem('gemguard_token') || 'token_' + newRole,
-      role: newRole,
-      name,
-      email,
-      department: newRole === 'PROCUREMENT_OFFICER' ? 'CPCL Procurement' : (newRole === 'TECHNICAL_EVALUATOR' ? 'Evaluation Committee' : 'Internal Audit'),
-    }));
-    window.dispatchEvent(new CustomEvent('gemguard:persona_changed', {
-      detail: { role: newRole, email, name }
-    }));
-  }
-
-  // ── ACTION CENTER HANDLERS (Procurement Officer) ──────────────────────
-  async function handleApproveClearance(bid) {
-    setActionSuccessMsg(null);
+  async function handleApprove(bid) {
+    setBanner(null);
     try {
-      const res = await fetch(`/api/v1/bids/${bid.id}/officer-action`, {
+      await fetch(`/api/v1/bids/${bid.id}/officer-action`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}`,
-        },
-        body: JSON.stringify({
-          action: 'APPROVE',
-          reason: 'Cleared for commercial bid opening after verification of all statutory criteria.',
-          actor: localStorage.getItem('user_name') || 'officer@cpcl.gov.in',
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}` },
+        body: JSON.stringify({ action: 'APPROVE', reason: 'Cleared for commercial bid opening.', actor: authState?.email || 'officer@cpcl.gov.in' }),
       }).catch(() => null);
-
       setBids(prev => prev.map(b => b.id === bid.id ? { ...b, overall_status: 'PASS', compliance_status: 'COMPLIANT' } : b));
-      setActionSuccessMsg(`✓ Approved Clearance for ${bid.bidder?.name || bid.bidder_name}. Recorded to SHA-256 Audit Chain.`);
-      setTimeout(() => setActionSuccessMsg(null), 4000);
-    } catch (e) {
-      setActionErrorMsg('Failed to process approval.');
-    }
+      setBanner({ type: 'success', msg: `✓ Clearance approved for ${bid.bidder?.name || bid.bidder_name}. Recorded to audit chain.` });
+    } catch { setBanner({ type: 'error', msg: 'Action failed.' }); }
   }
 
-  async function handleIssueShowCause(bid) {
-    setActionSuccessMsg(null);
+  async function handleShowCause(bid) {
+    setBanner(null);
     try {
-      const res = await fetch(`/api/v1/bids/${bid.id}/officer-action`, {
+      await fetch(`/api/v1/bids/${bid.id}/officer-action`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}`,
-        },
-        body: JSON.stringify({
-          action: 'SEEK_CLARIFICATION',
-          reason: `Statutory Show-Cause Notice issued regarding: ${bid.contradiction_details || bid.shortfall_details || 'Eligibility discrepancy'}. Response required within 48 hours.`,
-          actor: localStorage.getItem('user_name') || 'officer@cpcl.gov.in',
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}` },
+        body: JSON.stringify({ action: 'SEEK_CLARIFICATION', reason: bid.contradiction_details || bid.shortfall_details || 'Eligibility discrepancy — 48h response required.', actor: authState?.email || 'officer@cpcl.gov.in' }),
       }).catch(() => null);
-
-      setActionSuccessMsg(`✓ Formal Show-Cause Notice dispatched to ${bid.bidder?.name || bid.bidder_name} with 48-hour response window.`);
-      setTimeout(() => setActionSuccessMsg(null), 4000);
-    } catch {
-      setActionErrorMsg('Failed to issue notice.');
-    }
+      setBanner({ type: 'warning', msg: `📋 Show-Cause Notice dispatched to ${bid.bidder?.name || bid.bidder_name}. 48-hour response window started.` });
+    } catch { setBanner({ type: 'error', msg: 'Failed to issue notice.' }); }
   }
 
-  function openOverrideModal(bid) {
-    setSelectedBidForAction(bid);
-    setOverrideTargetStatus(bid.overall_status === 'FAIL' ? 'REVIEW' : 'PASS');
-    setOverrideJustification(
-      bid.bidder_code === 'B'
-        ? 'Invoking CPCL MSME exemption clause 5.2 as permitted under Ministry of MSME gazette notification.'
-        : 'Entity name discrepancy resolved via MCA Certificate of Name Change dated 14/02/2023.'
-    );
-    setOverrideModalOpen(true);
+  function openOverride(bid) {
+    setOverrideBid(bid);
+    setOverrideStatus(bid.overall_status === 'FAIL' ? 'REVIEW' : 'PASS');
+    setOverrideJust(bid.bidder_code === 'B'
+      ? 'Invoking CPCL MSME exemption clause 5.2 per MoPNG gazette notification.'
+      : 'Entity name discrepancy resolved via MCA Certificate of Name Change dated 14/02/2023.');
+    setOverrideOpen(true);
   }
 
-  async function handleExecuteOverride() {
-    if (!selectedBidForAction || !overrideJustification || overrideJustification.trim().length < 5) {
-      alert('A substantive justification (minimum 5 characters) is required by statutory audit regulations.');
+  async function handleOverride() {
+    if (!overrideJust || overrideJust.trim().length < 5) {
+      alert('A substantive justification (min 5 chars) is required by statutory audit regulations.');
       return;
     }
-
     try {
-      await fetch(`/api/v1/bids/${selectedBidForAction.id}/override`, {
+      await fetch(`/api/v1/bids/${overrideBid.id}/override`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}`,
-        },
-        body: JSON.stringify({
-          rule_id: 'REQ-FIN-01',
-          new_status: overrideTargetStatus,
-          justification: overrideJustification,
-          actor: localStorage.getItem('user_name') || 'officer@cpcl.gov.in',
-        }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}` },
+        body: JSON.stringify({ new_status: overrideStatus, justification: overrideJust, actor: authState?.email || 'officer@cpcl.gov.in' }),
       }).catch(() => null);
-
-      setBids(prev => prev.map(b => {
-        if (b.id === selectedBidForAction.id) {
-          return {
-            ...b,
-            overall_status: overrideTargetStatus,
-            compliance_status: overrideTargetStatus === 'PASS' ? 'COMPLIANT' : 'UNDER_REVIEW',
-            risk_band: overrideTargetStatus === 'PASS' ? 'LOW' : 'MEDIUM',
-          };
-        }
-        return b;
-      }));
-
-      // Append to audit stream
-      setAuditEvents(prev => [
-        {
-          id: `evt-${Date.now()}`,
-          block_index: prev.length + 1,
-          timestamp: new Date().toISOString(),
-          action: 'OFFICER_OVERRIDE',
-          actor: localStorage.getItem('user_name') || 'officer@cpcl.gov.in',
-          actor_role: 'PROCUREMENT_OFFICER',
-          entity_id: selectedBidForAction.id,
-          prev_hash: prev[0]?.event_hash || '3f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c',
-          event_hash: 'e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9',
-          details: {
-            justification: overrideJustification,
-            new_status: overrideTargetStatus,
-            target_bidder: selectedBidForAction.bidder?.name || selectedBidForAction.bidder_name,
-          },
-        },
-        ...prev,
-      ]);
-
-      setActionSuccessMsg(`✓ Statutory Override executed for ${selectedBidForAction.bidder?.name}! Immutably chained to SHA-256 block ledger.`);
-      setOverrideModalOpen(false);
-      setTimeout(() => setActionSuccessMsg(null), 4500);
-    } catch {
-      setActionErrorMsg('Could not log override.');
-    }
+      setBids(prev => prev.map(b => b.id === overrideBid.id
+        ? { ...b, overall_status: overrideStatus, compliance_status: overrideStatus === 'PASS' ? 'COMPLIANT' : 'UNDER_REVIEW' }
+        : b));
+      setBanner({ type: 'success', msg: `✓ Statutory override executed for ${overrideBid.bidder?.name}. Immutably chained to SHA-256 ledger.` });
+      setOverrideOpen(false);
+    } catch { setBanner({ type: 'error', msg: 'Override failed.' }); }
   }
 
-  // ── CORRIGENDUM QUICK-TRIGGER SIMULATION ─────────────────────────────
-  async function handleSimulateCorrigendum() {
-    setCorrigendumSimulating(true);
-    setCorrigendumSimResult(null);
+  async function handleReset() {
+    setResetting(true);
     try {
-      await new Promise(r => setTimeout(r, 600));
-      const threshNum = parseFloat(simulatedThreshold) || 10.0;
-      
-      // Determine impact on bidders
-      const affected = bids.map(b => {
-        const bidderTurnover = b.bidder?.turnover_cr || 0;
-        const currentPass = bidderTurnover >= 10.0;
-        const simPass = bidderTurnover >= threshNum;
-        const flipped = !currentPass && simPass;
-        return {
-          bidder_name: b.bidder?.name || b.bidder_name,
-          turnover_cr: bidderTurnover,
-          current_status: b.overall_status,
-          simulated_status: simPass ? 'PASS' : 'FAIL',
-          flipped,
-        };
-      });
-
-      const flippedCount = affected.filter(a => a.flipped).length;
-
-      setCorrigendumSimResult({
-        metric: corrigendumMetric,
-        old_threshold: '10.0 Cr',
-        new_threshold: `${threshNum} Cr`,
-        bidders_flipped_to_pass: flippedCount,
-        details: affected,
-      });
-    } finally {
-      setCorrigendumSimulating(false);
-    }
+      await resetDemo();
+      await loadData();
+      setBanner({ type: 'success', msg: '✓ Demo data reset. 4 benchmark bidders reloaded.' });
+    } catch { setBanner({ type: 'error', msg: 'Reset failed.' }); }
+    finally { setResetting(false); }
   }
 
-  // ── TECHNICAL EVALUATOR ACTIONS ──────────────────────────────────────
-  function handleRequestClarification(bid, clause) {
-    alert(`Technical Clarification Notice drafted for ${bid.bidder?.name || bid.bidder_name} regarding ${clause}. Sent to bidder portal.`);
-  }
+  // KPIs
+  const total = bids.length;
+  const passCount = bids.filter(b => ['PASS', 'COMPLIANT'].includes(b.overall_status || b.compliance_status)).length;
+  const failCount = bids.filter(b => ['FAIL', 'NON_COMPLIANT'].includes(b.overall_status || b.compliance_status)).length;
+  const reviewCount = bids.filter(b => ['REVIEW', 'UNDER_REVIEW'].includes(b.overall_status || b.compliance_status)).length;
+  const pendingCount = bids.filter(b => ['PENDING', 'PENDING_VERIFICATION'].includes(b.overall_status || b.compliance_status)).length;
 
-  function handleFlagDiscrepancy(bid, metric) {
-    alert(`Calculation discrepancy flagged on ${metric} for ${bid.bidder?.name || bid.bidder_name}. Placed in Technical Evaluation Committee queue.`);
-  }
+  const actionQueue = bids.filter(b =>
+    ['FAIL', 'NON_COMPLIANT', 'REVIEW', 'UNDER_REVIEW'].includes(b.overall_status || b.compliance_status)
+  );
 
   return (
-    <div style={{
-      minHeight: 'calc(100vh - 54px)',
-      background: '#f8fafc',
-      fontFamily: "'Inter', sans-serif",
-      padding: '24px 28px',
-      maxWidth: 1400,
-      margin: '0 auto',
-    }}>
-      {/* ── HEADER BANNER & ACTIVE PERSONA INDICATOR ───────────────────── */}
-      <div style={{
-        background: '#ffffff',
-        border: '1px solid #e2e8f0',
-        borderRadius: 12,
-        padding: '20px 24px',
-        marginBottom: 24,
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        flexWrap: 'wrap',
-        gap: 16,
-        boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
-      }}>
+    <div style={{ minHeight: 'calc(100vh - 54px)', background: '#f8fafc', fontFamily: "'Inter', sans-serif", padding: '24px 28px', maxWidth: 1400, margin: '0 auto' }}>
+
+      {/* ─── Header ─────────────────────────────────────────────────────────── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '20px 24px', marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-            <span style={{
-              fontSize: 10,
-              fontWeight: 800,
-              padding: '3px 10px',
-              borderRadius: 6,
-              background: activeRole === 'PROCUREMENT_OFFICER' ? '#dcfce7' : (activeRole === 'TECHNICAL_EVALUATOR' ? '#dbeafe' : '#f3e8ff'),
-              color: activeRole === 'PROCUREMENT_OFFICER' ? '#15803d' : (activeRole === 'TECHNICAL_EVALUATOR' ? '#1d4ed8' : '#7e22ce'),
-              border: `1px solid ${activeRole === 'PROCUREMENT_OFFICER' ? '#86efac' : (activeRole === 'TECHNICAL_EVALUATOR' ? '#93c5fd' : '#d8b4fe')}`,
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-            }}>
-              {activeRole === 'PROCUREMENT_OFFICER' && '🟢 Procurement Officer Dashboard'}
-              {activeRole === 'TECHNICAL_EVALUATOR' && '🔵 Technical Evaluator Dashboard'}
-              {activeRole === 'AUDIT_OFFICER' && '🟣 Vigilance & Audit Officer Dashboard'}
-            </span>
-            <span style={{ fontSize: 12, color: '#64748b' }}>
-              Tender Ref: <strong style={{ color: '#0f172a', fontFamily: 'monospace' }}>GEM/2026/B/4521001</strong> (CPCL Refinery)
-            </span>
-          </div>
-
-          <h1 style={{ margin: '4px 0 2px', fontSize: 22, fontWeight: 800, color: '#0f172a' }}>
-            {activeRole === 'PROCUREMENT_OFFICER' && 'Executive Procurement Decision & Clearance Center'}
-            {activeRole === 'TECHNICAL_EVALUATOR' && 'Technical Evidence Verification & Clause Inspector'}
-            {activeRole === 'AUDIT_OFFICER' && 'Cryptographic Tamper-Evident Audit Trail & Override Monitor'}
+          <span style={{ fontSize: 10, fontWeight: 800, padding: '3px 10px', borderRadius: 6, background: '#dcfce7', color: '#15803d', border: '1px solid #86efac', letterSpacing: '0.06em' }}>
+            🟢 PROCUREMENT OFFICER
+          </span>
+          <h1 style={{ margin: '6px 0 2px', fontSize: 22, fontWeight: 800, color: '#0f172a' }}>
+            Procurement Decision & Action Centre
           </h1>
-
           <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
-            {activeRole === 'PROCUREMENT_OFFICER' && 'Review non-compliant bids, issue formal show-cause notices, execute overrides, and simulate corrigenda.'}
-            {activeRole === 'TECHNICAL_EVALUATOR' && 'Inspect document claims, verify CA UDINs, inspect bounding boxes side-by-side, and flag discrepancies.'}
-            {activeRole === 'AUDIT_OFFICER' && 'Monitor immutable SHA-256 hash chains, inspect human override justifications, and verify zero-tamper integrity.'}
+            {tender ? `Tender: ${tender.reference_number || tender.title}` : 'GEM/2026/B/4521001 · CPCL Refinery Modernization'}
+            {' '}· {total} bids submitted
           </p>
         </div>
-
-        {/* Quick Role Switcher Buttons inside Dashboard */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f8fafc', padding: 4, borderRadius: 8, border: '1px solid #e2e8f0' }}>
-          <button
-            id="switch-to-procurement-btn"
-            onClick={() => switchRoleInline('PROCUREMENT_OFFICER', 'officer@cpcl.gov.in', 'Shri R. Venkatraman')}
-            style={{
-              padding: '6px 12px',
-              borderRadius: 6,
-              fontSize: 11,
-              fontWeight: 700,
-              border: 'none',
-              cursor: 'pointer',
-              background: activeRole === 'PROCUREMENT_OFFICER' ? '#10b981' : 'transparent',
-              color: activeRole === 'PROCUREMENT_OFFICER' ? '#ffffff' : '#64748b',
-            }}
-          >
-            Procurement
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => navigate('/tenders')}
+            style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', color: '#1d4ed8', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+            📋 Manage Tender
           </button>
-          <button
-            id="switch-to-evaluator-btn"
-            onClick={() => switchRoleInline('TECHNICAL_EVALUATOR', 'evaluator@cpcl.gov.in', 'Dr. Ananya Sundaram')}
-            style={{
-              padding: '6px 12px',
-              borderRadius: 6,
-              fontSize: 11,
-              fontWeight: 700,
-              border: 'none',
-              cursor: 'pointer',
-              background: activeRole === 'TECHNICAL_EVALUATOR' ? '#2563eb' : 'transparent',
-              color: activeRole === 'TECHNICAL_EVALUATOR' ? '#ffffff' : '#64748b',
-            }}
-          >
-            Evaluator
+          <button onClick={() => navigate('/corrigendum')}
+            style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', color: '#d97706', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+            📝 Corrigendum
           </button>
-          <button
-            id="switch-to-auditor-btn"
-            onClick={() => switchRoleInline('AUDIT_OFFICER', 'auditor@cpcl.gov.in', 'Smt. K. Meenakshi')}
-            style={{
-              padding: '6px 12px',
-              borderRadius: 6,
-              fontSize: 11,
-              fontWeight: 700,
-              border: 'none',
-              cursor: 'pointer',
-              background: activeRole === 'AUDIT_OFFICER' ? '#7c3aed' : 'transparent',
-              color: activeRole === 'AUDIT_OFFICER' ? '#ffffff' : '#64748b',
-            }}
-          >
-            Vigilance & Audit
+          <button onClick={handleReset} disabled={resetting}
+            style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 12, cursor: 'pointer' }}>
+            {resetting ? '⏳' : '🔄'} Reset Demo
           </button>
         </div>
       </div>
 
-      {/* Action Success / Error Notifications */}
-      {actionSuccessMsg && (
+      {/* ─── Banner ──────────────────────────────────────────────────────────── */}
+      {banner && (
         <div style={{
-          background: '#dcfce7',
-          border: '1px solid #86efac',
-          borderRadius: 8,
-          padding: '12px 18px',
-          color: '#166534',
-          fontSize: 13,
-          fontWeight: 700,
-          marginBottom: 20,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
+          marginBottom: 20, padding: '12px 18px', borderRadius: 8, fontSize: 13, fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          background: banner.type === 'success' ? '#dcfce7' : banner.type === 'warning' ? '#fffbeb' : '#fee2e2',
+          color: banner.type === 'success' ? '#166534' : banner.type === 'warning' ? '#92400e' : '#991b1b',
+          border: `1px solid ${banner.type === 'success' ? '#86efac' : banner.type === 'warning' ? '#fde68a' : '#fca5a5'}`,
         }}>
-          <CheckCircle2 size={16} />
-          <span>{actionSuccessMsg}</span>
+          {banner.msg}
+          <button onClick={() => setBanner(null)} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 18 }}>×</button>
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {/* ── PERSONA VIEW A: PROCUREMENT OFFICER ─────────────────────────── */}
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {activeRole === 'PROCUREMENT_OFFICER' && (
-        <div>
-          {/* 1. Action-Oriented Queue (Prominent Administrative Alert Boxes) */}
-          <div style={{ marginBottom: 24 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>🚨</span> Action-Oriented Queue: Bidders Requiring Immediate Administrative Action
+      {/* ─── KPI Cards ───────────────────────────────────────────────────────── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+        {[
+          { label: 'Total Bids', value: total, color: '#1e3a8a', bg: '#eff6ff', border: '#bfdbfe', icon: '📦' },
+          { label: 'Compliant', value: passCount, color: '#166534', bg: '#dcfce7', border: '#86efac', icon: '✓' },
+          { label: 'Require Action', value: failCount + reviewCount, color: '#991b1b', bg: '#fee2e2', border: '#fca5a5', icon: '⚠️' },
+          { label: 'Pending Verification', value: pendingCount, color: '#475569', bg: '#f1f5f9', border: '#cbd5e1', icon: '⏳' },
+        ].map(k => (
+          <div key={k.label} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '20px 22px', display: 'flex', alignItems: 'center', gap: 16 }}>
+            <div style={{ width: 48, height: 48, borderRadius: 12, background: k.bg, border: `1px solid ${k.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, flexShrink: 0 }}>
+              {k.icon}
             </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16 }}>
-              {/* Alert 1: Falcon Heavy Works (Turnover Shortfall) */}
-              <div style={{
-                background: '#fef2f2',
-                border: '1px solid #fecaca',
-                borderRadius: 10,
-                padding: '18px 20px',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-              }}>
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div>
-                      <span style={{ fontSize: 10, fontWeight: 800, color: '#dc2626', background: '#fee2e2', padding: '2px 6px', borderRadius: 4 }}>
-                        CRITICAL SHORTFALL
-                      </span>
-                      <h3 style={{ margin: '4px 0 2px', fontSize: 15, fontWeight: 800, color: '#991b1b' }}>
-                        Falcon Heavy Works Private Limited
-                      </h3>
-                      <div style={{ fontSize: 11, color: '#7f1d1d', fontFamily: 'monospace' }}>GSTIN: 07AAACF5678K1ZP</div>
-                    </div>
-                    <span style={{ fontSize: 12, fontWeight: 800, color: '#b91c1c' }}>Bidder B</span>
-                  </div>
-
-                  <p style={{ fontSize: 12, color: '#991b1b', margin: '10px 0 14px', lineHeight: 1.5 }}>
-                    <strong>Mandatory Turnover Shortfall:</strong> Certified 3FY turnover is <strong>₹8.40 Cr</strong> vs mandatory requirement of <strong>≥ ₹10.00 Cr</strong> (Deficit: ₹1.60 Cr).
-                  </p>
-                </div>
-
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', borderTop: '1px solid #fecaca', paddingTop: 12 }}>
-                  <button
-                    id="btn-showcause-falcon"
-                    onClick={() => handleIssueShowCause(bids[1])}
-                    style={{
-                      background: '#ffffff',
-                      border: '1px solid #fca5a5',
-                      color: '#b91c1c',
-                      padding: '6px 12px',
-                      borderRadius: 6,
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Issue Show-Cause Notice
-                  </button>
-                  <button
-                    id="btn-override-falcon"
-                    onClick={() => openOverrideModal(bids[1])}
-                    style={{
-                      background: '#b91c1c',
-                      border: 'none',
-                      color: '#ffffff',
-                      padding: '6px 14px',
-                      borderRadius: 6,
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Initiate Statutory Override
-                  </button>
-                </div>
-              </div>
-
-              {/* Alert 2: Apex Buildtech (Cross-Document Contradiction) */}
-              <div style={{
-                background: '#fffbeb',
-                border: '1px solid #fde68a',
-                borderRadius: 10,
-                padding: '18px 20px',
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-              }}>
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div>
-                      <span style={{ fontSize: 10, fontWeight: 800, color: '#d97706', background: '#fef3c7', padding: '2px 6px', borderRadius: 4 }}>
-                        CROSS-DOC CONTRADICTION
-                      </span>
-                      <h3 style={{ margin: '4px 0 2px', fontSize: 15, fontWeight: 800, color: '#92400e' }}>
-                        Apex Buildtech & Engineering Consortium
-                      </h3>
-                      <div style={{ fontSize: 11, color: '#78350f', fontFamily: 'monospace' }}>GSTIN: 27AABCA9999M1ZQ</div>
-                    </div>
-                    <span style={{ fontSize: 12, fontWeight: 800, color: '#d97706' }}>Bidder C</span>
-                  </div>
-
-                  <p style={{ fontSize: 12, color: '#92400e', margin: '10px 0 14px', lineHeight: 1.5 }}>
-                    <strong>Legal Entity Name Mismatch:</strong> PAN certificate reads <em>"APEX INFRASTRUCTURE PVT LTD"</em> whereas GST REG-06 states <em>"APEX BUILDTECH LIMITED"</em>.
-                  </p>
-                </div>
-
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', borderTop: '1px solid #fde68a', paddingTop: 12 }}>
-                  <button
-                    id="btn-showcause-apex"
-                    onClick={() => handleIssueShowCause(bids[2])}
-                    style={{
-                      background: '#ffffff',
-                      border: '1px solid #fcd34d',
-                      color: '#92400e',
-                      padding: '6px 12px',
-                      borderRadius: 6,
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Issue Show-Cause Notice
-                  </button>
-                  <button
-                    id="btn-override-apex"
-                    onClick={() => openOverrideModal(bids[2])}
-                    style={{
-                      background: '#d97706',
-                      border: 'none',
-                      color: '#ffffff',
-                      padding: '6px 14px',
-                      borderRadius: 6,
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Initiate Statutory Override
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* 2. Disqualification & Clearance Action Center Table */}
-          <div className="card" style={{ marginBottom: 24 }}>
-            <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9' }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
-                Disqualification & Clearance Action Center
-              </div>
-              <div style={{ fontSize: 12, color: '#64748b' }}>
-                Procurement Officer actions directly alter qualification state and cryptographically chain events
-              </div>
-            </div>
-
-            <div style={{ overflowX: 'auto' }}>
-              <table className="data-table" id="officer-action-table">
-                <thead>
-                  <tr>
-                    <th>Code</th>
-                    <th>Bidder Organization</th>
-                    <th>Turnover</th>
-                    <th>Compliance Status</th>
-                    <th>Risk Band</th>
-                    <th style={{ textAlign: 'right' }}>Officer Action Controls</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bids.map(b => (
-                    <tr key={b.id}>
-                      <td style={{ fontWeight: 800, color: '#1e3a8a' }}>{b.bidder_code || b.id.slice(-1)}</td>
-                      <td>
-                        <div style={{ fontWeight: 700, color: '#0f172a' }}>{b.bidder?.name || b.bidder_name}</div>
-                        <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>{b.bidder?.gstin}</div>
-                      </td>
-                      <td style={{ fontWeight: 700, color: (b.bidder?.turnover_cr || 0) >= 10 ? '#15803d' : '#b91c1c' }}>
-                        ₹{(b.bidder?.turnover_cr || 0).toFixed(1)} Cr
-                      </td>
-                      <td><StatusBadge status={b.overall_status || b.compliance_status} /></td>
-                      <td><StatusBadge status={b.risk_band || 'LOW'} /></td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: 6 }}>
-                          <button
-                            id={`btn-clearance-${b.id}`}
-                            onClick={() => handleApproveClearance(b)}
-                            style={{
-                              background: '#dcfce7',
-                              border: '1px solid #86efac',
-                              color: '#166534',
-                              padding: '5px 10px',
-                              borderRadius: 5,
-                              fontSize: 11,
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Approve Clearance
-                          </button>
-                          <button
-                            id={`btn-notice-${b.id}`}
-                            onClick={() => handleIssueShowCause(b)}
-                            style={{
-                              background: '#fef3c7',
-                              border: '1px solid #fcd34d',
-                              color: '#92400e',
-                              padding: '5px 10px',
-                              borderRadius: 5,
-                              fontSize: 11,
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Show-Cause Notice
-                          </button>
-                          <button
-                            id={`btn-override-${b.id}`}
-                            onClick={() => openOverrideModal(b)}
-                            style={{
-                              background: '#eff6ff',
-                              border: '1px solid #bfdbfe',
-                              color: '#1d4ed8',
-                              padding: '5px 10px',
-                              borderRadius: 5,
-                              fontSize: 11,
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Statutory Override
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* 3. Corrigendum Quick-Trigger Simulator */}
-          <div className="card" style={{ padding: '20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span>⚡</span> Corrigendum Quick-Trigger & Instant What-If Simulator
-                </div>
-                <div style={{ fontSize: 12, color: '#64748b' }}>
-                  Simulate RFP rule adjustments and instantly observe compliance status flips across all bidders
-                </div>
-              </div>
-
-              <button
-                onClick={() => navigate('/corrigendum')}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: '#2563eb',
-                  fontSize: 12,
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 4,
-                }}
-              >
-                <span>Open Full Corrigendum Impact Studio</span>
-                <ArrowRight size={14} />
-              </button>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, alignItems: 'flex-end', background: '#f8fafc', padding: 16, borderRadius: 8, border: '1px solid #e2e8f0' }}>
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                  Rule Metric to Amend:
-                </label>
-                <select
-                  value={corrigendumMetric}
-                  onChange={e => setCorrigendumMetric(e.target.value)}
-                  style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' }}
-                >
-                  <option value="annual_turnover_cr">Clause 3.1.2: Annual Turnover (₹ Cr)</option>
-                  <option value="local_content_percentage">Clause 4.2.1: MII Local Content (%)</option>
-                </select>
-              </div>
-
-              <div>
-                <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                  Simulated Threshold Value:
-                </label>
-                <input
-                  type="text"
-                  value={simulatedThreshold}
-                  onChange={e => setSimulatedThreshold(e.target.value)}
-                  placeholder="e.g. 8.0"
-                  style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' }}
-                />
-              </div>
-
-              <div>
-                <button
-                  id="btn-simulate-corrigendum-impact"
-                  onClick={handleSimulateCorrigendum}
-                  disabled={corrigendumSimulating}
-                  style={{
-                    width: '100%',
-                    padding: '9px 16px',
-                    borderRadius: 6,
-                    border: 'none',
-                    background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                    color: '#ffffff',
-                    fontSize: 12,
-                    fontWeight: 700,
-                    cursor: corrigendumSimulating ? 'wait' : 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <Sliders size={14} />
-                  <span>{corrigendumSimulating ? 'Simulating…' : 'Run What-If Impact Simulation'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Simulation Results Display */}
-            {corrigendumSimResult && (
-              <div style={{ marginTop: 16, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: '#1e40af', marginBottom: 8 }}>
-                  Simulation Outcome: Lowering threshold to {corrigendumSimResult.new_threshold} flips {corrigendumSimResult.bidders_flipped_to_pass} disqualified bidder to COMPLIANT!
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
-                  {corrigendumSimResult.details.map((d, i) => (
-                    <div key={i} style={{ background: '#ffffff', padding: '10px 12px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 11 }}>
-                      <div style={{ fontWeight: 700, color: '#0f172a' }}>{d.bidder_name}</div>
-                      <div style={{ color: '#64748b' }}>Turnover: ₹{d.turnover_cr} Cr</div>
-                      <div style={{ marginTop: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>Prior: <strong style={{ color: d.current_status === 'FAIL' ? '#dc2626' : '#16a34a' }}>{d.current_status}</strong></span>
-                        <span>➔</span>
-                        <span>New: <strong style={{ color: d.simulated_status === 'FAIL' ? '#dc2626' : '#16a34a' }}>{d.simulated_status}</strong></span>
-                      </div>
-                      {d.flipped && (
-                        <div style={{ marginTop: 4, color: '#15803d', fontWeight: 800, fontSize: 10 }}>
-                          ✓ FLIPPED TO COMPLIANT
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {/* ── PERSONA VIEW B: TECHNICAL EVALUATOR ─────────────────────────── */}
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {activeRole === 'TECHNICAL_EVALUATOR' && (
-        <div>
-          {/* Top Quick Launch for Split Document Viewer */}
-          <div style={{
-            background: 'linear-gradient(135deg, #1e3a8a 0%, #0f172a 100%)',
-            borderRadius: 12,
-            padding: '20px 24px',
-            color: '#ffffff',
-            marginBottom: 24,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 16,
-          }}>
             <div>
-              <div style={{ fontSize: 11, fontWeight: 800, color: '#93c5fd', textTransform: 'uppercase' }}>
-                Dual-Pane Vision & LayoutLM Verification Suite
-              </div>
-              <h3 style={{ margin: '4px 0 2px', fontSize: 18, fontWeight: 800 }}>
-                Split Evidence Inspector: Side-by-Side Bounding Box & Registry Verification
-              </h3>
-              <p style={{ margin: 0, fontSize: 12, color: '#cbd5e1' }}>
-                Inspect original PDF layout coordinates [x1, y1, x2, y2] against extracted CA UDINs and statutory API responses.
-              </p>
-            </div>
-
-            <button
-              id="btn-launch-split-viewer-top"
-              onClick={() => setSplitViewerOpen(true)}
-              style={{
-                background: '#2563eb',
-                border: '1px solid rgba(255,255,255,0.2)',
-                color: '#ffffff',
-                padding: '10px 20px',
-                borderRadius: 8,
-                fontSize: 13,
-                fontWeight: 800,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                boxShadow: '0 4px 14px rgba(37,99,235,0.4)',
-              }}
-            >
-              <Eye size={16} />
-              <span>Launch Split Evidence Inspector</span>
-            </button>
-          </div>
-
-          {/* Evidence & Technical Matrix Table */}
-          <div className="card">
-            <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9' }}>
-              <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
-                Evidence & Technical Compliance Matrix
-              </div>
-              <div style={{ fontSize: 12, color: '#64748b' }}>
-                Technical evaluation tools replacing administrative clearance controls
-              </div>
-            </div>
-
-            <div style={{ overflowX: 'auto' }}>
-              <table className="data-table" id="technical-matrix-table">
-                <thead>
-                  <tr>
-                    <th>Bidder</th>
-                    <th>Local Content % (Req: ≥50%)</th>
-                    <th>CA UDIN (ICAI Verified)</th>
-                    <th>Make-in-India Affidavit</th>
-                    <th>Technical Status</th>
-                    <th style={{ textAlign: 'right' }}>Technical Evaluator Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bids.map(b => {
-                    const mii = b.bidder?.local_content_pct || 50;
-                    const udin = b.bidder?.ca_udin || '24058912AAAAAA9812';
-                    return (
-                      <tr key={b.id}>
-                        <td>
-                          <div style={{ fontWeight: 700, color: '#0f172a' }}>{b.bidder?.name || b.bidder_name}</div>
-                          <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace' }}>GSTIN: {b.bidder?.gstin}</div>
-                        </td>
-
-                        {/* Local Content */}
-                        <td>
-                          <div style={{ fontWeight: 800, color: mii >= 50.0 ? '#15803d' : '#b91c1c' }}>
-                            {mii.toFixed(1)}% Local Content
-                          </div>
-                          <div style={{ fontSize: 10, color: '#64748b' }}>
-                            {mii >= 50.0 ? 'Class-I Local Supplier' : 'Class-II (Ineligible for Class-I reserve)'}
-                          </div>
-                        </td>
-
-                        {/* CA UDIN */}
-                        <td>
-                          <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 11, color: '#1e3a8a' }}>
-                            {udin}
-                          </div>
-                          <div style={{ fontSize: 10, color: '#16a34a', fontWeight: 700 }}>
-                            ✓ ICAI Portal Validated
-                          </div>
-                        </td>
-
-                        {/* MII Affidavit */}
-                        <td>
-                          <span style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            padding: '2px 8px',
-                            borderRadius: 4,
-                            background: mii >= 50 ? '#dcfce7' : '#fee2e2',
-                            color: mii >= 50 ? '#166534' : '#991b1b',
-                          }}>
-                            {mii >= 50 ? 'Auditor Certified' : 'Discrepancy in Factory Location'}
-                          </span>
-                        </td>
-
-                        {/* Status */}
-                        <td>
-                          <StatusBadge status={b.overall_status || b.compliance_status} />
-                        </td>
-
-                        {/* Action Controls */}
-                        <td style={{ textAlign: 'right' }}>
-                          <div style={{ display: 'inline-flex', gap: 6 }}>
-                            <button
-                              id={`btn-verify-bbox-${b.id}`}
-                              onClick={() => setSplitViewerOpen(true)}
-                              style={{
-                                background: '#eff6ff',
-                                border: '1px solid #bfdbfe',
-                                color: '#1d4ed8',
-                                padding: '5px 10px',
-                                borderRadius: 5,
-                                fontSize: 11,
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 4,
-                              }}
-                            >
-                              <Eye size={12} />
-                              <span>Verify Bounding Box</span>
-                            </button>
-                            <button
-                              id={`btn-tech-clarification-${b.id}`}
-                              onClick={() => handleRequestClarification(b, 'Local Content Affidavit')}
-                              style={{
-                                background: '#f8fafc',
-                                border: '1px solid #cbd5e1',
-                                color: '#334155',
-                                padding: '5px 10px',
-                                borderRadius: 5,
-                                fontSize: 11,
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                              }}
-                            >
-                              Request Clarification
-                            </button>
-                            <button
-                              id={`btn-flag-calc-${b.id}`}
-                              onClick={() => handleFlagDiscrepancy(b, 'Turnover / MII %')}
-                              style={{
-                                background: '#fee2e2',
-                                border: '1px solid #fca5a5',
-                                color: '#b91c1c',
-                                padding: '5px 10px',
-                                borderRadius: 5,
-                                fontSize: 11,
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                              }}
-                            >
-                              Flag Calculation
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+              <div style={{ fontSize: 28, fontWeight: 800, color: k.color, lineHeight: 1 }}>{k.value}</div>
+              <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>{k.label}</div>
             </div>
           </div>
-        </div>
-      )}
+        ))}
+      </div>
 
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {/* ── PERSONA VIEW C: AUDIT & VIGILANCE OFFICER ───────────────────── */}
-      {/* ═══════════════════════════════════════════════════════════════════ */}
-      {activeRole === 'AUDIT_OFFICER' && (
-        <div>
-          {/* Cryptographic SHA-256 Chain Validation Banner */}
-          <div style={{
-            background: 'linear-gradient(90deg, rgba(16,185,129,0.12) 0%, rgba(15,23,42,0.04) 100%)',
-            border: '1px solid #86efac',
-            borderRadius: 12,
-            padding: '18px 24px',
-            marginBottom: 24,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 16,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-              <div style={{
-                width: 44,
-                height: 44,
-                borderRadius: 10,
-                background: '#dcfce7',
-                border: '1px solid #86efac',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: '#166534',
+      {/* ─── Action Queue ────────────────────────────────────────────────────── */}
+      {actionQueue.length > 0 && (
+        <div style={{ background: '#fff', border: '1px solid #fecaca', borderRadius: 12, marginBottom: 24, overflow: 'hidden' }}>
+          <div style={{ padding: '16px 20px', borderBottom: '1px solid #fee2e2', background: '#fef2f2', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 16 }}>🚨</span>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#991b1b' }}>Action Queue — {actionQueue.length} bids require immediate officer decision</div>
+              <div style={{ fontSize: 12, color: '#b91c1c' }}>Each action is cryptographically appended to the SHA-256 audit chain</div>
+            </div>
+          </div>
+          <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {actionQueue.map(bid => (
+              <div key={bid.id} style={{
+                padding: '16px 20px', borderRadius: 10, border: `1px solid ${bid.overall_status === 'FAIL' || bid.compliance_status === 'NON_COMPLIANT' ? '#fca5a5' : '#fde68a'}`,
+                background: bid.overall_status === 'FAIL' || bid.compliance_status === 'NON_COMPLIANT' ? '#fef2f2' : '#fffbeb',
               }}>
-                <ShieldCheck size={24} />
-              </div>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 11, fontWeight: 800, color: '#166534', background: '#dcfce7', padding: '2px 8px', borderRadius: 4 }}>
-                    CHAIN VALIDATED · INTEGRITY GUARANTEED
-                  </span>
-                  <span style={{ fontSize: 12, color: '#64748b' }}>5/5 Cryptographic Blocks Verified</span>
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 800, color: '#0f172a', marginTop: 2 }}>
-                  Mathematical Proof: <code style={{ color: '#1e3a8a' }}>event_hash = SHA256(prev_hash + payload)</code>
-                </div>
-              </div>
-            </div>
-
-            <button
-              id="btn-launch-audit-replay-modal"
-              onClick={() => setAuditReplayOpen(true)}
-              style={{
-                background: 'linear-gradient(135deg, #7c3aed, #5b21b6)',
-                color: '#ffffff',
-                border: 'none',
-                padding: '9px 18px',
-                borderRadius: 7,
-                fontSize: 12,
-                fontWeight: 700,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                boxShadow: '0 4px 12px rgba(124,58,237,0.3)',
-              }}
-            >
-              <Play size={14} />
-              <span>Launch Tamper-Evident Replay Player</span>
-            </button>
-          </div>
-
-          {/* Tamper-Evident Event Stream & Override Monitor */}
-          <div className="card">
-            <div style={{
-              padding: '16px 20px',
-              borderBottom: '1px solid #f1f5f9',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 12,
-            }}>
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
-                  Tamper-Evident Event Stream & Human Override Monitor
-                </div>
-                <div style={{ fontSize: 12, color: '#64748b' }}>
-                  Every administrative decision and system inference immutably logged with SHA-256 forward-chaining
-                </div>
-              </div>
-
-              {/* Filter: All vs Overrides Only */}
-              <div style={{ display: 'flex', border: '1px solid #cbd5e1', borderRadius: 6, overflow: 'hidden' }}>
-                <button
-                  id="btn-filter-all-events"
-                  onClick={() => setAuditFilterOnlyOverrides(false)}
-                  style={{
-                    padding: '6px 14px',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    border: 'none',
-                    cursor: 'pointer',
-                    background: !auditFilterOnlyOverrides ? '#7c3aed' : '#ffffff',
-                    color: !auditFilterOnlyOverrides ? '#ffffff' : '#475569',
-                  }}
-                >
-                  All Audit Events ({auditEvents.length})
-                </button>
-                <button
-                  id="btn-filter-overrides-only"
-                  onClick={() => setAuditFilterOnlyOverrides(true)}
-                  style={{
-                    padding: '6px 14px',
-                    fontSize: 11,
-                    fontWeight: 700,
-                    border: 'none',
-                    cursor: 'pointer',
-                    background: auditFilterOnlyOverrides ? '#7c3aed' : '#ffffff',
-                    color: auditFilterOnlyOverrides ? '#ffffff' : '#475569',
-                  }}
-                >
-                  Human Overrides Only (OFFICER_OVERRIDE)
-                </button>
-              </div>
-            </div>
-
-            {/* Event Stream List */}
-            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {auditEvents
-                .filter(evt => !auditFilterOnlyOverrides || evt.action === 'OFFICER_OVERRIDE')
-                .map((evt, idx) => {
-                  const isOverride = evt.action === 'OFFICER_OVERRIDE';
-                  return (
-                    <div
-                      key={evt.id || idx}
-                      style={{
-                        border: `1px solid ${isOverride ? '#fcd34d' : '#e2e8f0'}`,
-                        background: isOverride ? '#fffbeb' : '#ffffff',
-                        borderRadius: 8,
-                        padding: '16px',
-                        boxShadow: '0 1px 2px rgba(0,0,0,0.02)',
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <span style={{
-                            fontSize: 10,
-                            fontWeight: 900,
-                            fontFamily: 'monospace',
-                            background: isOverride ? '#fef3c7' : '#f1f5f9',
-                            color: isOverride ? '#92400e' : '#334155',
-                            padding: '3px 8px',
-                            borderRadius: 4,
-                          }}>
-                            BLOCK #{evt.block_index || (auditEvents.length - idx)}
-                          </span>
-
-                          <span style={{
-                            fontSize: 11,
-                            fontWeight: 800,
-                            color: isOverride ? '#b45309' : '#1e3a8a',
-                            background: isOverride ? '#fef3c7' : '#eff6ff',
-                            padding: '2px 8px',
-                            borderRadius: 4,
-                          }}>
-                            {evt.action}
-                          </span>
-
-                          <span style={{ fontSize: 11, color: '#64748b' }}>
-                            by <strong style={{ color: '#0f172a' }}>{evt.actor}</strong> ({evt.actor_role})
-                          </span>
-                        </div>
-
-                        <div style={{ fontSize: 11, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <Clock size={12} />
-                          <span>{new Date(evt.timestamp).toLocaleString('en-IN')}</span>
-                        </div>
-                      </div>
-
-                      {/* Override Justification Box if Human Override */}
-                      {isOverride && evt.details?.justification && (
-                        <div style={{
-                          marginTop: 10,
-                          padding: '10px 14px',
-                          background: '#ffffff',
-                          border: '1px solid #fde68a',
-                          borderRadius: 6,
-                          fontSize: 12,
-                          color: '#78350f',
-                        }}>
-                          <strong>Mandatory Officer Written Justification:</strong> "{evt.details.justification}"
-                        </div>
-                      )}
-
-                      {/* Cryptographic SHA-256 Linkage Bar */}
-                      <div style={{
-                        marginTop: 10,
-                        padding: '8px 12px',
-                        background: '#f8fafc',
-                        border: '1px solid #e2e8f0',
-                        borderRadius: 6,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        fontSize: 10,
-                        fontFamily: 'monospace',
-                        color: '#475569',
-                        flexWrap: 'wrap',
-                        gap: 8,
-                      }}>
-                        <div>
-                          <span style={{ color: '#94a3b8' }}>Prev Hash: </span>
-                          <span style={{ color: '#2563eb' }}>{evt.prev_hash?.slice(0, 24)}...</span>
-                        </div>
-                        <div>
-                          <span>➔</span>
-                        </div>
-                        <div>
-                          <span style={{ color: '#94a3b8' }}>Event Hash: </span>
-                          <span style={{ color: '#16a34a', fontWeight: 800 }}>{evt.event_hash?.slice(0, 24)}...</span>
-                        </div>
-                        <div style={{ color: '#16a34a', fontWeight: 800 }}>
-                          ✓ SHA-256 MATCHED
-                        </div>
-                      </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      <span style={{ fontWeight: 800, fontSize: 14, color: '#0f172a' }}>
+                        {bid.bidder_code}. {bid.bidder?.name || bid.bidder_name}
+                      </span>
+                      <Pill status={bid.overall_status || bid.compliance_status} />
+                      <Pill status={bid.risk_band || 'MEDIUM'} />
                     </div>
-                  );
-                })}
-            </div>
+                    <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'monospace', marginBottom: 6 }}>
+                      GSTIN: {bid.bidder?.gstin} · Turnover: ₹{(bid.bidder?.turnover_cr || 0).toFixed(1)} Cr
+                    </div>
+                    {(bid.shortfall_details || bid.contradiction_details || bid.pending_details) && (
+                      <div style={{ fontSize: 12, color: '#475569', background: 'rgba(0,0,0,0.04)', padding: '8px 12px', borderRadius: 6, borderLeft: '3px solid #cbd5e1', maxWidth: 600 }}>
+                        {bid.shortfall_details || bid.contradiction_details || bid.pending_details}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                    <button onClick={() => handleApprove(bid)}
+                      style={{ padding: '7px 14px', borderRadius: 6, border: '1px solid #86efac', background: '#dcfce7', color: '#166534', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                      ✓ Approve Clearance
+                    </button>
+                    <button onClick={() => handleShowCause(bid)}
+                      style={{ padding: '7px 14px', borderRadius: 6, border: '1px solid #fde68a', background: '#fffbeb', color: '#92400e', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                      📋 Show-Cause Notice
+                    </button>
+                    <button onClick={() => openOverride(bid)}
+                      style={{ padding: '7px 14px', borderRadius: 6, border: '1px solid #bfdbfe', background: '#eff6ff', color: '#1d4ed8', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                      ⚡ Statutory Override
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {/* ── MODAL 1: STATUTORY OFFICER OVERRIDE MODAL ───────────────────── */}
-      {overrideModalOpen && selectedBidForAction && (
-        <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.65)',
-          backdropFilter: 'blur(3px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 9999, padding: 20,
-        }}>
-          <div style={{
-            background: '#ffffff',
-            borderRadius: 12,
-            width: '100%',
-            maxWidth: 520,
-            padding: 24,
-            boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
-          }}>
-            <h3 style={{ margin: '0 0 6px', fontSize: 17, fontWeight: 800, color: '#1e3a8a' }}>
-              ⚖️ Initiate Statutory Officer Override
-            </h3>
-            <p style={{ margin: '0 0 16px', fontSize: 12, color: '#64748b' }}>
-              Statutory overrides bypass automated rules and are cryptographically signed with your credentials to the SHA-256 audit ledger.
-            </p>
+      {/* ─── All Bids Summary Table ───────────────────────────────────────────── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>Bid Status Overview</div>
+            <div style={{ fontSize: 12, color: '#64748b' }}>All submitted bids for this tender · Read-only summary</div>
+          </div>
+          <button onClick={loadData} disabled={loading}
+            style={{ padding: '7px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 12, cursor: 'pointer' }}>
+            {loading ? '⏳' : '🔄'} Refresh
+          </button>
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #f1f5f9', background: '#f8fafc' }}>
+                {['Code', 'Bidder', 'GSTIN', 'Turnover', 'Compliance Status', 'Risk Band'].map(h => (
+                  <th key={h} style={{ padding: '10px 16px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#64748b', letterSpacing: '0.04em' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {bids.map((b, i) => (
+                <tr key={b.id} style={{ borderBottom: '1px solid #f1f5f9', background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
+                  <td style={{ padding: '12px 16px', fontWeight: 800, color: '#1e3a8a', fontSize: 14 }}>{b.bidder_code}</td>
+                  <td style={{ padding: '12px 16px', fontWeight: 600, color: '#0f172a' }}>{b.bidder?.name || b.bidder_name}</td>
+                  <td style={{ padding: '12px 16px', fontFamily: 'monospace', fontSize: 11, color: '#475569' }}>{b.bidder?.gstin || '—'}</td>
+                  <td style={{ padding: '12px 16px', fontWeight: 700, color: (b.bidder?.turnover_cr || 0) >= 10 ? '#166534' : '#b91c1c' }}>
+                    ₹{(b.bidder?.turnover_cr || 0).toFixed(1)} Cr
+                  </td>
+                  <td style={{ padding: '12px 16px' }}><Pill status={b.overall_status || b.compliance_status} /></td>
+                  <td style={{ padding: '12px 16px' }}><Pill status={b.risk_band || 'LOW'} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
-                Target Bidder Organization:
-              </label>
-              <input
-                type="text"
-                disabled
-                value={`${selectedBidForAction.bidder?.name || selectedBidForAction.bidder_name} (${selectedBidForAction.bidder?.gstin})`}
-                style={{ width: '100%', padding: '8px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc' }}
-              />
-            </div>
-
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', display: 'block', marginBottom: 4 }}>
-                New Desired Compliance Status:
-              </label>
-              <select
-                value={overrideTargetStatus}
-                onChange={e => setOverrideTargetStatus(e.target.value)}
-                style={{ width: '100%', padding: '8px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #cbd5e1' }}
-              >
-                <option value="PASS">PASS (Approve qualification)</option>
-                <option value="REVIEW">REVIEW (Permit conditional submission)</option>
-                <option value="FAIL">FAIL (Disqualify with cause)</option>
-              </select>
+      {/* ─── Override Modal ───────────────────────────────────────────────────── */}
+      {overrideOpen && overrideBid && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}>
+          <div style={{ background: '#fff', borderRadius: 16, padding: '28px', width: 520, maxWidth: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#b91c1c', marginBottom: 4 }}>⚡ STATUTORY OVERRIDE — AUDIT LOGGED</div>
+                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#0f172a' }}>{overrideBid.bidder?.name}</h2>
+              </div>
+              <button onClick={() => setOverrideOpen(false)} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: '#64748b' }}>×</button>
             </div>
 
             <div style={{ marginBottom: 16 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#b91c1c', display: 'block', marginBottom: 4 }}>
-                * Mandatory Statutory Written Justification (Min 5 chars):
-              </label>
-              <textarea
-                rows={3}
-                value={overrideJustification}
-                onChange={e => setOverrideJustification(e.target.value)}
-                placeholder="State statutory circular, pre-bid clarification, or MSME gazette exemption..."
-                style={{ width: '100%', padding: '8px 10px', fontSize: 12, borderRadius: 6, border: '1px solid #cbd5e1', outline: 'none' }}
-              />
+              <label style={{ fontSize: 12, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 6 }}>NEW STATUS</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {['REVIEW', 'PASS', 'FAIL'].map(s => (
+                  <button key={s} onClick={() => setOverrideStatus(s)}
+                    style={{ padding: '8px 16px', borderRadius: 8, border: `2px solid ${overrideStatus === s ? '#1d4ed8' : '#e2e8f0'}`, background: overrideStatus === s ? '#eff6ff' : '#fff', color: overrideStatus === s ? '#1d4ed8' : '#64748b', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              <button
-                onClick={() => setOverrideModalOpen(false)}
-                style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px 16px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
-              >
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ fontSize: 12, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 6 }}>
+                JUSTIFICATION <span style={{ color: '#b91c1c' }}>*</span> (mandatory for CVC/CAG audit)
+              </label>
+              <textarea value={overrideJust} onChange={e => setOverrideJust(e.target.value)} rows={4}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' }}
+                placeholder="Statutory grounds for override..." />
+            </div>
+
+            <div style={{ padding: '12px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, marginBottom: 20, fontSize: 12, color: '#92400e' }}>
+              ⚠️ This action is irreversible and will be cryptographically chained to the SHA-256 audit ledger. Ensure compliance with GFR 2017 Rule 175.
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setOverrideOpen(false)}
+                style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontWeight: 700, cursor: 'pointer' }}>
                 Cancel
               </button>
-              <button
-                id="btn-confirm-override-submit"
-                onClick={handleExecuteOverride}
-                disabled={!overrideJustification || overrideJustification.trim().length < 5}
-                style={{
-                  background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                  color: '#ffffff',
-                  border: 'none',
-                  padding: '8px 18px',
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 800,
-                  cursor: overrideJustification.trim().length >= 5 ? 'pointer' : 'not-allowed',
-                }}
-              >
-                Sign & Append to SHA-256 Audit Chain
+              <button onClick={handleOverride}
+                style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg, #1e3a8a, #2563eb)', color: '#fff', fontWeight: 700, cursor: 'pointer' }}>
+                Execute Override & Chain to Ledger
               </button>
             </div>
           </div>
         </div>
-      )}
-
-      {/* ── MODAL 2: SPLIT DOCUMENT VIEWER (Technical Evaluator) ────────── */}
-      {splitViewerOpen && (
-        <SplitDocumentViewer onClose={() => setSplitViewerOpen(false)} />
-      )}
-
-      {/* ── MODAL 3: AUDIT REPLAY PLAYER (Vigilance & Audit Officer) ────── */}
-      {auditReplayOpen && (
-        <AuditReplayModal onClose={() => setAuditReplayOpen(false)} />
       )}
     </div>
   );

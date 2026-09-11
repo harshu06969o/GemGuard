@@ -23,7 +23,7 @@ python-docx>=1.1.0
 pandas>=2.2.0
 scikit-learn>=1.5.0
 # OCR (optional - install Tesseract system binary separately)
-pytesseract==0.3.14
+pytesseract==0.3.13
 opencv-python-headless==4.11.0.86
 numpy==2.2.6
 # Testing

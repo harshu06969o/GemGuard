@@ -907,11 +907,14 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # --- Centralized Routers -----------------------------------------------------
 
+from app.routers import tenders, bids, rules, audit, corrigendum, financial
+
 app.include_router(tenders.router)
 app.include_router(bids.router)
 app.include_router(rules.router)
 app.include_router(audit.router)
 app.include_router(corrigendum.router)
+app.include_router(financial.router)
 
 
 # --- Health ------------------------------------------------------------------

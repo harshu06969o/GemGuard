@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { useSelector } from 'react-redux';
 import TopNav from './components/TopNav';
 import LandingPage from './pages/LandingPage';
 import DashboardPage from './pages/DashboardPage';
@@ -8,8 +9,11 @@ import BidderWorkspacePage from './pages/BidderWorkspacePage';
 import ComplianceDashboard from './pages/ComplianceDashboard';
 import CorrigendumPage from './pages/CorrigendumPage';
 import LoginPage from './pages/LoginPage';
+import FinancialWorkspacePage from './pages/FinancialWorkspacePage';
+import AuditWorkspacePage from './pages/AuditWorkspacePage';
 import { getToken } from './api/client';
 
+// ─── Auth Guard ───────────────────────────────────────────────────────────────
 function RequireAuth({ children }) {
   const token = getToken() || localStorage.getItem('token') || localStorage.getItem('gemguard_token');
   if (!token) {
@@ -18,43 +22,88 @@ function RequireAuth({ children }) {
   return children ? <>{children}</> : <Outlet />;
 }
 
+// ─── Role Guard ───────────────────────────────────────────────────────────────
+// Redirects to the role's home workspace if user tries to access an unauthorized route.
+function RoleGuard({ allowedRoles, fallback }) {
+  const authState = useSelector(s => s.auth);
+  const role = authState?.role || localStorage.getItem('role') || '';
+  if (!allowedRoles.includes(role)) {
+    return <Navigate to={fallback || ROLE_HOME[role] || '/login'} replace />;
+  }
+  return <Outlet />;
+}
+
+// Role → default home route
+const ROLE_HOME = {
+  PROCUREMENT_OFFICER: '/dashboard',
+  TECHNICAL_EVALUATOR: '/bids',
+  FINANCIAL_EVALUATOR: '/financial',
+  AUDIT_OFFICER: '/audit',
+  BIDDER: '/my-bids',
+};
+
+// ─── Layout with TopNav ────────────────────────────────────────────────────────
+function AuthLayout() {
+  return (
+    <RequireAuth>
+      <TopNav />
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+        <Outlet />
+      </div>
+    </RequireAuth>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter>
       <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
         <Routes>
-          {/* STEP 1: Full-Screen Enterprise Landing Hero at root / */}
+          {/* Public */}
           <Route path="/" element={<LandingPage />} />
-
-          {/* Public Login Route */}
           <Route path="/login" element={<LoginPage />} />
 
-          {/* Protected Enterprise Workspaces with TopNav */}
-          <Route element={
-            <RequireAuth>
-              <TopNav />
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <Outlet />
-              </div>
-            </RequireAuth>
-          }>
-            <Route path="/dashboard" element={<DashboardPage />} />
-            
-            {/* STEP 2: Tender Workspace Routes */}
-            <Route path="/tenders" element={<TenderWorkspacePage />} />
-            <Route path="/tender" element={<TenderWorkspacePage />} />
-            <Route path="/tenders/:tenderId" element={<TenderWorkspacePage />} />
-            <Route path="/tender/:tenderId" element={<TenderWorkspacePage />} />
+          {/* ── Protected Layout wrapper ─────────────────────────────── */}
+          <Route element={<AuthLayout />}>
 
-            {/* Other Workspaces */}
-            <Route path="/bids" element={<BidWorkspacePage />} />
-            <Route path="/bids/:bidId" element={<BidWorkspacePage />} />
-            <Route path="/my-bids" element={<BidderWorkspacePage />} />
-            <Route path="/compliance" element={<ComplianceDashboard />} />
-            <Route path="/corrigendum" element={<CorrigendumPage />} />
+            {/* PROCUREMENT_OFFICER workspace */}
+            <Route element={<RoleGuard allowedRoles={['PROCUREMENT_OFFICER']} />}>
+              <Route path="/dashboard" element={<DashboardPage />} />
+              <Route path="/tenders" element={<TenderWorkspacePage />} />
+              <Route path="/tenders/:tenderId" element={<TenderWorkspacePage />} />
+              <Route path="/tender" element={<TenderWorkspacePage />} />
+              <Route path="/tender/:tenderId" element={<TenderWorkspacePage />} />
+              <Route path="/corrigendum" element={<CorrigendumPage />} />
+            </Route>
+
+            {/* TECHNICAL_EVALUATOR workspace */}
+            <Route element={<RoleGuard allowedRoles={['TECHNICAL_EVALUATOR']} />}>
+              <Route path="/bids" element={<BidWorkspacePage />} />
+              <Route path="/bids/:bidId" element={<BidWorkspacePage />} />
+              <Route path="/compliance" element={<ComplianceDashboard />} />
+            </Route>
+
+            {/* FINANCIAL_EVALUATOR workspace */}
+            <Route element={<RoleGuard allowedRoles={['FINANCIAL_EVALUATOR']} />}>
+              <Route path="/financial" element={<FinancialWorkspacePage />} />
+            </Route>
+
+            {/* AUDIT_OFFICER workspace */}
+            <Route element={<RoleGuard allowedRoles={['AUDIT_OFFICER']} />}>
+              <Route path="/audit" element={<AuditWorkspacePage />} />
+            </Route>
+
+            {/* BIDDER workspace */}
+            <Route element={<RoleGuard allowedRoles={['BIDDER']} />}>
+              <Route path="/my-bids" element={<BidderWorkspacePage />} />
+            </Route>
+
+            {/* Shared: redirect /marketplace to correct role home */}
+            <Route path="/marketplace" element={<Navigate to="/my-bids" replace />} />
+
           </Route>
 
-          {/* Catch-all redirect to Landing */}
+          {/* Catch-all */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>

@@ -48,6 +48,34 @@ const PERSONAS = [
     department: 'Internal Audit Oversight',
     icon: '🛡️',
   },
+  {
+    email: 'financial@cpcl.gov.in',
+    altEmail: 'financial@gem.gov.in',
+    label: 'Financial Evaluator',
+    shortRole: 'FINANCIAL',
+    role: 'FINANCIAL_EVALUATOR',
+    badgeColor: '#f59e0b',
+    badgeBg: 'rgba(245,158,11,0.18)',
+    badgeBorder: 'rgba(245,158,11,0.4)',
+    password: 'Finance@123',
+    rights: 'Envelope Unsealing · L1 Ranking · MII/MSE',
+    department: 'Finance & Accounts',
+    icon: '💰',
+  },
+  {
+    email: 'bidder@vendor.com',
+    altEmail: 'bidder@vendor.com',
+    label: 'Bidder (BHEL)',
+    shortRole: 'BIDDER',
+    role: 'BIDDER',
+    badgeColor: '#06b6d4',
+    badgeBg: 'rgba(6,182,212,0.18)',
+    badgeBorder: 'rgba(6,182,212,0.4)',
+    password: 'Bidder@123',
+    rights: 'Marketplace · Sealed Upload · Dry-Run',
+    department: 'Vendor / Supplier',
+    icon: '🏢',
+  },
 ];
 
 export default function TopNav() {
@@ -133,6 +161,16 @@ export default function TopNav() {
       setBannerMsg({ type: 'success', text: `Switched active persona to ${target.label} (${target.rights})` });
       setTimeout(() => setBannerMsg(null), 3000);
 
+      // Navigate to the role's home workspace
+      const ROLE_HOME = {
+        PROCUREMENT_OFFICER: '/dashboard',
+        TECHNICAL_EVALUATOR: '/bids',
+        FINANCIAL_EVALUATOR: '/financial',
+        AUDIT_OFFICER: '/audit',
+        BIDDER: '/my-bids',
+      };
+      navigate(ROLE_HOME[target.role] || '/dashboard', { replace: true });
+
       // Trigger global event so active pages refresh with new permissions
       window.dispatchEvent(new CustomEvent('gemguard:persona_changed', { detail: target }));
     } catch {
@@ -186,13 +224,20 @@ export default function TopNav() {
   const activePersona = PERSONAS.find(p => p.role === user?.role) || PERSONAS[0];
 
   const NAV_ITEMS = [
-    { to: '/dashboard', label: 'Dashboard', icon: '🏠', show: true },
-    { to: '/tenders', label: 'Tenders', icon: '📋', show: user?.role !== 'AUDIT_OFFICER' },
-    { to: '/bids', label: 'Bid Matrix', icon: '📦', show: true },
-    { to: '/my-bids', label: 'Bidder Workspace', icon: '🏢', show: true },
-    { to: '/compliance', label: 'Compliance Trace', icon: '⚖️', show: true },
-    { to: '/corrigendum', label: 'Corrigendum', icon: '📝', show: user?.role === 'PROCUREMENT_OFFICER' },
-  ].filter(item => item.show);
+    // PROCUREMENT_OFFICER
+    { to: '/dashboard', label: 'Dashboard', icon: '🏠', roles: ['PROCUREMENT_OFFICER'] },
+    { to: '/tenders', label: 'Tenders', icon: '📋', roles: ['PROCUREMENT_OFFICER'] },
+    { to: '/corrigendum', label: 'Corrigendum', icon: '📝', roles: ['PROCUREMENT_OFFICER'] },
+    // TECHNICAL_EVALUATOR
+    { to: '/bids', label: 'Bid Matrix', icon: '📦', roles: ['TECHNICAL_EVALUATOR'] },
+    { to: '/compliance', label: 'Compliance Trace', icon: '⚖️', roles: ['TECHNICAL_EVALUATOR'] },
+    // FINANCIAL_EVALUATOR
+    { to: '/financial', label: 'Financial Review', icon: '💰', roles: ['FINANCIAL_EVALUATOR'] },
+    // AUDIT_OFFICER
+    { to: '/audit', label: 'Audit Chain', icon: '🛡️', roles: ['AUDIT_OFFICER'] },
+    // BIDDER
+    { to: '/my-bids', label: 'My Bids', icon: '🏢', roles: ['BIDDER'] },
+  ].filter(item => item.roles.includes(user?.role));
 
   return (
     <>
