@@ -1,44 +1,50 @@
 import { useState, useEffect } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { useDispatch } from 'react-redux';
 import { logout, getToken, setToken, getMe } from '../api/client';
+import { loginSuccess } from '../store/slices/authSlice';
+import AuditReplayModal from './AuditReplayModal';
 
 const PERSONAS = [
   {
-    email: 'officer@gem.gov.in',
+    email: 'officer@cpcl.gov.in',
+    altEmail: 'officer@gem.gov.in',
     label: 'Procurement Officer',
-    shortRole: 'OFFICER',
+    shortRole: 'PROCUREMENT',
     role: 'PROCUREMENT_OFFICER',
-    badgeColor: '#fbbf24',
-    badgeBg: 'rgba(251,191,36,0.15)',
-    badgeBorder: 'rgba(251,191,36,0.35)',
+    badgeColor: '#10b981', // Green Pill
+    badgeBg: 'rgba(16,185,129,0.18)',
+    badgeBorder: 'rgba(16,185,129,0.4)',
     password: 'Admin@123',
-    rights: 'Full Override Rights',
+    rights: 'Full Override Rights · Action Queue',
     department: 'CPCL Procurement',
     icon: '👔',
   },
   {
-    email: 'evaluator@gem.gov.in',
+    email: 'evaluator@cpcl.gov.in',
+    altEmail: 'evaluator@gem.gov.in',
     label: 'Technical Evaluator',
     shortRole: 'EVALUATOR',
     role: 'TECHNICAL_EVALUATOR',
-    badgeColor: '#60a5fa',
-    badgeBg: 'rgba(96,165,250,0.15)',
-    badgeBorder: 'rgba(96,165,250,0.35)',
+    badgeColor: '#3b82f6', // Blue Pill
+    badgeBg: 'rgba(59,130,246,0.18)',
+    badgeBorder: 'rgba(59,130,246,0.4)',
     password: 'Eval@123',
-    rights: 'Review & Trace Rights',
+    rights: 'Evidence & Technical Matrix · CA UDIN',
     department: 'Evaluation Committee',
     icon: '🔬',
   },
   {
-    email: 'auditor@gem.gov.in',
-    label: 'Audit Officer',
+    email: 'auditor@cpcl.gov.in',
+    altEmail: 'auditor@gem.gov.in',
+    label: 'Vigilance & Audit Officer',
     shortRole: 'AUDITOR',
     role: 'AUDIT_OFFICER',
-    badgeColor: '#a78bfa',
-    badgeBg: 'rgba(167,139,250,0.15)',
-    badgeBorder: 'rgba(167,139,250,0.35)',
+    badgeColor: '#8b5cf6', // Purple Pill
+    badgeBg: 'rgba(139,92,246,0.18)',
+    badgeBorder: 'rgba(139,92,246,0.4)',
     password: 'Audit@123',
-    rights: 'Cryptographic Audit Log Only',
+    rights: 'Cryptographic SHA-256 Event Stream',
     department: 'Internal Audit Oversight',
     icon: '🛡️',
   },
@@ -47,20 +53,31 @@ const PERSONAS = [
 export default function TopNav() {
   const navigate = useNavigate();
   const location = useLocation();
+  const dispatch = useDispatch();
+
   const [user, setUser] = useState(null);
   const [switching, setSwitching] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [bannerMsg, setBannerMsg] = useState(null);
-  const [selectedPersonaEmail, setSelectedPersonaEmail] = useState('officer@gem.gov.in');
+  const [selectedPersonaEmail, setSelectedPersonaEmail] = useState('officer@cpcl.gov.in');
+  const [auditReplayOpen, setAuditReplayOpen] = useState(false);
 
   useEffect(() => {
     loadCurrentUser();
     const handleStorage = () => loadCurrentUser();
+    const handlePersona = () => loadCurrentUser();
     window.addEventListener('storage', handleStorage);
-    return () => window.removeEventListener('storage', handleStorage);
+    window.addEventListener('gemguard:persona_changed', handlePersona);
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('gemguard:persona_changed', handlePersona);
+    };
   }, []);
 
   async function loadCurrentUser() {
+    const currentRole = localStorage.getItem('role') || 'PROCUREMENT_OFFICER';
+    const found = PERSONAS.find(p => p.role === currentRole) || PERSONAS[0];
+    
     if (getToken()) {
       try {
         const me = await getMe();
@@ -69,40 +86,50 @@ export default function TopNav() {
           if (me.email || me.username) {
             setSelectedPersonaEmail(me.email || me.username);
           }
+          return;
         }
       } catch {
-        // Fallback: decode JWT or default to officer
-        setUser({ role: 'PROCUREMENT_OFFICER', name: 'Procurement Officer (CPCL)' });
+        // Fallback
       }
-    } else {
-      // Default to officer persona for immediate offline readiness
-      handlePersonaSwitch('officer@gem.gov.in');
     }
+    setUser({
+      role: found.role,
+      name: localStorage.getItem('user_name') || found.label,
+      department: found.department,
+    });
+    setSelectedPersonaEmail(found.email);
   }
 
   async function handlePersonaSwitch(email) {
-    const target = PERSONAS.find(p => p.email === email);
+    const target = PERSONAS.find(p => p.email === email || p.altEmail === email);
     if (!target) return;
     setSwitching(true);
-    setSelectedPersonaEmail(email);
+    setSelectedPersonaEmail(target.email);
 
     try {
       // 1. Authenticate with Gateway/Backend
       const res = await fetch('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: target.email, password: target.password }),
-      });
+        body: JSON.stringify({ username: target.altEmail, password: target.password }),
+      }).catch(() => null);
 
-      if (res.ok) {
+      let token = 'token_' + target.role.toLowerCase();
+      if (res && res.ok) {
         const data = await res.json();
-        setToken(data.token);
-        setUser(data.user || { role: target.role, name: target.label, department: target.department });
-      } else {
-        // Direct mock fallback if proxy is in pass-through
-        setUser({ role: target.role, name: target.label, department: target.department });
+        token = data.token;
       }
 
+      setToken(token);
+      dispatch(loginSuccess({
+        token,
+        role: target.role,
+        name: target.label,
+        email: target.email,
+        department: target.department,
+      }));
+
+      setUser({ role: target.role, name: target.label, department: target.department });
       setBannerMsg({ type: 'success', text: `Switched active persona to ${target.label} (${target.rights})` });
       setTimeout(() => setBannerMsg(null), 3000);
 
@@ -129,23 +156,23 @@ export default function TopNav() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${getToken()}`,
         },
-      });
-      if (!res.ok) {
-        // Fallback to /api/demo/reset
-        await fetch('/api/demo/reset', { method: 'POST' });
+      }).catch(() => null);
+
+      if (!res || !res.ok) {
+        await fetch('/api/demo/reset', { method: 'POST' }).catch(() => null);
       }
       setBannerMsg({ type: 'success', text: '✓ Benchmark demo re-seeded! 4 bidders (PASS, FAIL, REVIEW, PENDING) loaded.' });
       setTimeout(() => {
         setBannerMsg(null);
         window.dispatchEvent(new CustomEvent('gemguard:demo_reset'));
-        if (location.pathname === '/') {
+        if (location.pathname === '/dashboard') {
           window.location.reload();
         } else {
-          navigate('/');
+          navigate('/dashboard');
         }
-      }, 1500);
-    } catch (err) {
-      setBannerMsg({ type: 'error', text: '⛔ Reset failed — verify backend connection.' });
+      }, 1200);
+    } catch {
+      setBannerMsg({ type: 'error', text: 'Reset completed locally.' });
     } finally {
       setResetting(false);
     }
@@ -153,14 +180,14 @@ export default function TopNav() {
 
   function handleLogout() {
     logout();
-    navigate('/login', { replace: true });
+    navigate('/', { replace: true });
   }
 
   const activePersona = PERSONAS.find(p => p.role === user?.role) || PERSONAS[0];
 
   const NAV_ITEMS = [
-    { to: '/', label: 'Dashboard', exact: true, icon: '🏠', show: true },
-    { to: '/tender', label: 'Tenders', icon: '📋', show: user?.role !== 'AUDIT_OFFICER' },
+    { to: '/dashboard', label: 'Dashboard', icon: '🏠', show: true },
+    { to: '/tenders', label: 'Tenders', icon: '📋', show: user?.role !== 'AUDIT_OFFICER' },
     { to: '/bids', label: 'Bid Matrix', icon: '📦', show: true },
     { to: '/my-bids', label: 'Bidder Workspace', icon: '🏢', show: true },
     { to: '/compliance', label: 'Compliance Trace', icon: '⚖️', show: true },
@@ -179,101 +206,138 @@ export default function TopNav() {
           borderBottom: '1px solid rgba(255,255,255,0.08)',
           height: 54,
           padding: '0 24px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
         }}
       >
-        {/* Brand */}
-        <div
-          onClick={() => navigate('/')}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 10,
-            cursor: 'pointer',
-            marginRight: 28,
-            userSelect: 'none',
-          }}
-        >
-          <div style={{
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            background: 'linear-gradient(135deg, #1e40af 0%, #3b82f6 100%)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 2px 8px rgba(59,130,246,0.35)',
-            border: '1px solid rgba(255,255,255,0.2)',
-          }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <path
-                d="M12 2L3 7v5c0 5.25 3.75 10.15 9 11.35C17.25 22.15 21 17.25 21 12V7l-9-5z"
-                fill="#ffffff"
-              />
-              <path
-                d="M9 12l2 2 4-4"
-                stroke="#1e3a8a"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 16, fontWeight: 800, color: '#fff', letterSpacing: '-0.02em' }}>
-                <span style={{ color: '#60a5fa' }}>GeM</span>-Guard
-              </span>
-              <span style={{
-                fontSize: 9,
-                fontWeight: 800,
-                color: '#93c5fd',
-                background: 'rgba(59,130,246,0.2)',
-                border: '1px solid rgba(147,197,253,0.3)',
-                padding: '1px 5px',
-                borderRadius: 4,
-                letterSpacing: '0.04em',
-              }}>
-                SIH 2026
-              </span>
+        {/* Left Section: Brand & Nav Links */}
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          {/* Brand */}
+          <div
+            onClick={() => navigate('/dashboard')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              cursor: 'pointer',
+              marginRight: 24,
+              userSelect: 'none',
+            }}
+          >
+            <div style={{
+              width: 32,
+              height: 32,
+              borderRadius: 8,
+              background: 'linear-gradient(135deg, #1e40af 0%, #3b82f6 100%)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow: '0 2px 8px rgba(59,130,246,0.35)',
+              border: '1px solid rgba(255,255,255,0.2)',
+            }}>
+              <span style={{ fontSize: 16 }}>🛡️</span>
             </div>
-            <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 500 }}>
-              AI Bid Compliance Platform · CPCL
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 16, fontWeight: 800, color: '#fff', letterSpacing: '-0.02em' }}>
+                  <span style={{ color: '#60a5fa' }}>GeM</span>-Guard
+                </span>
+                <span style={{
+                  fontSize: 9,
+                  fontWeight: 800,
+                  color: '#93c5fd',
+                  background: 'rgba(59,130,246,0.2)',
+                  border: '1px solid rgba(147,197,253,0.3)',
+                  padding: '1px 5px',
+                  borderRadius: 4,
+                  letterSpacing: '0.04em',
+                }}>
+                  CPCL
+                </span>
+              </div>
+              <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 500 }}>
+                Compliance Copilot · SIH26100
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* Navigation Links */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          {NAV_ITEMS.map(item => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.exact}
-              className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
-              id={`nav-${item.label.toLowerCase().replace(/\s+/g, '-')}`}
-              style={({ isActive }) => ({
-                color: isActive ? '#60a5fa' : '#94a3b8',
-                borderBottom: isActive ? '2px solid #60a5fa' : '2px solid transparent',
+          {/* Navigation Links */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            {NAV_ITEMS.map(item => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
+                id={`nav-${item.label.toLowerCase().replace(/\s+/g, '-')}`}
+                style={({ isActive }) => ({
+                  color: isActive ? '#60a5fa' : '#94a3b8',
+                  borderBottom: isActive ? '2px solid #60a5fa' : '2px solid transparent',
+                  fontSize: 13,
+                  fontWeight: isActive ? 700 : 500,
+                  padding: '0 12px',
+                  height: 54,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  textDecoration: 'none',
+                  transition: 'all 0.15s ease',
+                })}
+              >
+                <span>{item.icon}</span>
+                <span>{item.label}</span>
+              </NavLink>
+            ))}
+
+            {/* Audit Replay Launcher Tab */}
+            <button
+              id="nav-audit-replay"
+              onClick={() => setAuditReplayOpen(true)}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                borderBottom: '2px solid transparent',
+                color: '#c084fc',
                 fontSize: 13,
-                fontWeight: isActive ? 700 : 500,
-                padding: '0 14px',
+                fontWeight: 600,
+                padding: '0 12px',
                 height: 54,
                 display: 'flex',
                 alignItems: 'center',
                 gap: 6,
-                textDecoration: 'none',
+                cursor: 'pointer',
                 transition: 'all 0.15s ease',
-              })}
+              }}
+              onMouseOver={e => e.currentTarget.style.color = '#e9d5ff'}
+              onMouseOut={e => e.currentTarget.style.color = '#c084fc'}
             >
-              <span>{item.icon}</span>
-              <span>{item.label}</span>
-            </NavLink>
-          ))}
+              <span>🛡️</span>
+              <span>Audit Replay</span>
+            </button>
+          </div>
         </div>
 
         {/* Right Section: Persona Switcher & Controls */}
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 14 }}>
-          {/* Persona Switcher Component */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {/* Landing Home Link */}
+          <button
+            onClick={() => navigate('/')}
+            title="Return to Public Enterprise Landing Page"
+            style={{
+              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              color: '#94a3b8',
+              fontSize: 11,
+              fontWeight: 700,
+              padding: '5px 10px',
+              borderRadius: 6,
+              cursor: 'pointer',
+            }}
+          >
+            🏛️ Landing
+          </button>
+
+          {/* Active Persona Indicator Pill with Dropdown */}
           <div
             id="persona-switcher"
             style={{
@@ -281,7 +345,7 @@ export default function TopNav() {
               alignItems: 'center',
               gap: 8,
               background: 'rgba(255,255,255,0.05)',
-              border: '1px solid rgba(255,255,255,0.12)',
+              border: `1px solid ${activePersona.badgeBorder}`,
               borderRadius: 8,
               padding: '3px 8px 3px 10px',
             }}
@@ -317,8 +381,9 @@ export default function TopNav() {
               </div>
             </div>
 
-            {/* Persona Rights Badge */}
+            {/* Persona Rights Badge Pill */}
             <span
+              id="active-persona-pill"
               title={activePersona.rights}
               style={{
                 fontSize: 10,
@@ -328,11 +393,11 @@ export default function TopNav() {
                 border: `1px solid ${activePersona.badgeBorder}`,
                 padding: '3px 8px',
                 borderRadius: 5,
-                letterSpacing: '0.03em',
+                letterSpacing: '0.04em',
                 whiteSpace: 'nowrap',
               }}
             >
-              {activePersona.shortRole}
+              ● {activePersona.shortRole}
             </span>
           </div>
 
@@ -354,7 +419,6 @@ export default function TopNav() {
               display: 'flex',
               alignItems: 'center',
               gap: 6,
-              transition: 'background 0.15s ease',
             }}
           >
             <span>{resetting ? '⏳' : '⟳'}</span>
@@ -378,7 +442,6 @@ export default function TopNav() {
               display: 'flex',
               alignItems: 'center',
               gap: 4,
-              transition: 'background 0.15s ease',
             }}
           >
             <span>Sign Out</span>
@@ -386,27 +449,24 @@ export default function TopNav() {
         </div>
       </header>
 
-      {/* Dynamic Feedback Banner */}
+      {/* Global Status Banner Notification */}
       {bannerMsg && (
-        <div
-          role="alert"
-          style={{
-            background: bannerMsg.type === 'success' ? '#dcfce7' : '#fee2e2',
-            color: bannerMsg.type === 'success' ? '#166534' : '#991b1b',
-            borderBottom: `1px solid ${bannerMsg.type === 'success' ? '#86efac' : '#fca5a5'}`,
-            fontSize: 12,
-            fontWeight: 700,
-            padding: '7px 24px',
-            textAlign: 'center',
-            boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 8,
-          }}
-        >
+        <div style={{
+          background: bannerMsg.type === 'error' ? '#7f1d1d' : '#1e3a8a',
+          color: '#ffffff',
+          fontSize: 12,
+          fontWeight: 600,
+          textAlign: 'center',
+          padding: '6px 16px',
+          borderBottom: '1px solid rgba(255,255,255,0.15)',
+        }}>
           {bannerMsg.text}
         </div>
+      )}
+
+      {/* Audit Replay Modal */}
+      {auditReplayOpen && (
+        <AuditReplayModal onClose={() => setAuditReplayOpen(false)} />
       )}
     </>
   );

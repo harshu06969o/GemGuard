@@ -465,6 +465,7 @@ async def list_verifications(bid_id: str, db=Depends(get_db)):
     return bid.get("verifications", [])
 
 
+@router.post("/api/v1/bids/{bid_id}/officer-action")
 @router.post("/api/bids/{bid_id}/officer-action")
 @router.post("/bids/{bid_id}/officer-action")
 async def officer_action(bid_id: str, body: OfficerActionRequest, db=Depends(get_db)):

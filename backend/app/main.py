@@ -826,7 +826,21 @@ async def seed_default_users(db):
             "department": "CPCL Procurement",
         },
         {
+            "username": "officer@cpcl.gov.in",
+            "password_hash": hash_password("Admin@123"),
+            "role": "PROCUREMENT_OFFICER",
+            "name": "Procurement Officer (CPCL)",
+            "department": "CPCL Procurement",
+        },
+        {
             "username": "evaluator@gem.gov.in",
+            "password_hash": hash_password("Eval@123"),
+            "role": "TECHNICAL_EVALUATOR",
+            "name": "Technical Evaluator (CPCL)",
+            "department": "Technical Evaluation Committee",
+        },
+        {
+            "username": "evaluator@cpcl.gov.in",
             "password_hash": hash_password("Eval@123"),
             "role": "TECHNICAL_EVALUATOR",
             "name": "Technical Evaluator (CPCL)",
@@ -839,6 +853,13 @@ async def seed_default_users(db):
             "name": "Audit Officer (CPCL)",
             "department": "Internal Audit",
         },
+        {
+            "username": "auditor@cpcl.gov.in",
+            "password_hash": hash_password("Audit@123"),
+            "role": "AUDIT_OFFICER",
+            "name": "Audit Officer (CPCL)",
+            "department": "Internal Audit",
+        },
     ]
     for u in defaults:
         existing = await db["users"].find_one({"username": u["username"]})
@@ -846,6 +867,7 @@ async def seed_default_users(db):
             u["created_at"] = utcnow_str()
             await db["users"].insert_one(u)
             logger.info("Seeded user: %s (%s)", u["username"], u["role"])
+
 
 
 # --- FastAPI App -------------------------------------------------------------
