@@ -289,44 +289,29 @@ export default function LandingPage() {
             </div>
           </div>
 
-          {/* Quick Access to standard login & docs */}
+          {/* Header Action */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <button
               onClick={() => navigate('/login')}
               style={{
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.15)',
-                color: '#cbd5e1',
-                padding: '7px 16px',
-                borderRadius: 7,
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-              onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.12)'}
-              onMouseOut={e => e.currentTarget.style.background = 'rgba(255,255,255,0.06)'}
-            >
-              Bidder Portal Login
-            </button>
-            <button
-              onClick={() => handleQuickEntry(DEMO_PERSONAS[0])}
-              style={{
                 background: 'linear-gradient(135deg, #2563eb, #1d4ed8)',
                 border: 'none',
                 color: '#ffffff',
-                padding: '8px 18px',
+                padding: '8px 20px',
                 borderRadius: 7,
-                fontSize: 12,
+                fontSize: 13,
                 fontWeight: 700,
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 6,
                 boxShadow: '0 4px 14px rgba(37,99,235,0.4)',
+                transition: 'all 0.15s ease',
               }}
+              onMouseOver={e => e.currentTarget.style.transform = 'translateY(-1px)'}
+              onMouseOut={e => e.currentTarget.style.transform = 'none'}
             >
-              <span>Instant Officer Workspace</span>
+              <span>Sign In / Login</span>
               <ArrowRight size={14} />
             </button>
           </div>

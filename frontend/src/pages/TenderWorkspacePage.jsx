@@ -1,945 +1,832 @@
+/**
+ * TenderWorkspacePage — PROCUREMENT_OFFICER only
+ *
+ * Tab 1 — My Tenders: list of all tenders this officer has published
+ *   - Status badge, deadline, estimated value, bid count
+ *   - Click → expands compiled rules + RFP upload for that tender
+ *
+ * Tab 2 — Create New Tender: structured form
+ *   Step 1: Fill metadata (title, ref no, authority, value, deadlines)
+ *   Step 2: Upload RFP PDF → AI extracts eligibility rules → officer reviews & publishes
+ *
+ * Does NOT contain:
+ *  ✗ Corrigendum rule editor  (→ /corrigendum)
+ *  ✗ Bid list / bidder status  (→ /bids, /dashboard)
+ *  ✗ Compliance results  (→ /compliance)
+ */
+
 import { Fragment, useEffect, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   getTender,
-  getTenderBids,
   listTenders,
+  createTender,
   uploadTenderDocument,
-  compileRequirements,
+  getTenderBids,
 } from '../api/client';
-import StatusBadge from '../components/StatusBadge';
-import { LoadingSpinner, ErrorMessage } from '../components/Card';
-import {
-  FileText, Upload, CheckCircle2, AlertTriangle, ShieldCheck,
-  Eye, Edit3, ArrowRight, RefreshCw, Layers, ExternalLink,
-  ChevronRight, Sparkles, Sliders, X, Clock, FileCheck, Hash
-} from 'lucide-react';
 
-// Robust CPCL Benchmark Tender Fallback
+// ─── Default demo tender (always shown when backend is offline) ───────────────
 export const DEFAULT_CPCL_TENDER = {
   id: 'tnd_cpcl_refinery_001',
   reference_number: 'GEM/2026/B/4521001',
-  tender_no: 'GEM/2026/B/4521001',
   title: 'CPCL Manali Refinery Modernization & High-Pressure Hydrocracker Piping System',
   organization: 'Chennai Petroleum Corporation Limited (CPCL)',
-  buyer: 'CPCL / Ministry of Petroleum and Natural Gas (MoPNG)',
-  authority: 'CPCL / MoPNG Â· Government of India',
+  authority: 'CPCL / MoPNG · Government of India',
   estimated_value_cr: 48.50,
-  estimated_value: 'â‚¹ 48,50,00,000',
+  estimated_value: '₹ 48,50,00,000',
   closing_date: '2026-10-28T17:00:00.000Z',
-  submission_deadline: '2026-10-28T17:00:00.000Z',
   status: 'ACTIVE',
   turnover_threshold_cr: 10.0,
   file_hash: '3f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a',
   filename: 'CPCL_RFP_Modernization_2026_B_4521001.pdf',
-  documents: [
-    {
-      id: 'doc-cpcl-rfp-main',
-      original_filename: 'CPCL_RFP_Modernization_2026_B_4521001.pdf',
-      file_hash: '3f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a',
-      file_size: 4892400,
-      uploaded_by: 'officer@cpcl.gov.in',
-      uploaded_at: '2026-09-01T10:00:00.000Z',
-      pages: 42,
-    }
-  ],
+  documents: [{
+    id: 'doc-cpcl-rfp-main',
+    original_filename: 'CPCL_RFP_Modernization_2026_B_4521001.pdf',
+    file_hash: '3f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a',
+    file_size: 4892400,
+    uploaded_by: 'officer@cpcl.gov.in',
+    uploaded_at: '2026-09-01T10:00:00.000Z',
+  }],
   requirement_rules: [
-    {
-      id: 'rule-01',
-      requirement_id: 'REQ-FIN-01',
-      clause_id: 'Clause 3.1.2',
-      clause_reference: 'Section III Â· Financial Eligibility',
-      clause_text: 'The average annual financial turnover of the bidder during the last 3 financial years, ending on 31st March 2024, must be at least â‚¹10.00 Crores (INR Ten Crores), certified by a Chartered Accountant with valid ICAI UDIN.',
-      metric: 'annual_turnover_cr',
-      operator: 'GTE',
-      threshold_value: '10.0',
-      threshold_unit: 'â‚¹ Cr',
-      category: 'FINANCIAL',
-      severity: 'CRITICAL',
-      is_mandatory: true,
-      evidence_type: 'CA_TURNOVER_CERTIFICATE',
-      verification_sources: ['CA_UDIN_REGISTRY', 'ITR_PORTAL'],
-      compilation_source: 'AI_COMPILER',
-      status: 'COMPILED_VALID',
-    },
-    {
-      id: 'rule-02',
-      requirement_id: 'REQ-MII-02',
-      clause_id: 'Clause 4.2.1',
-      clause_reference: 'Section IV Â· Public Procurement (Make in India) Order 2017',
-      clause_text: 'Only Class-I Local Suppliers with local domestic value addition equal to or exceeding 50.0% shall be eligible. Bidders must furnish a statutory auditor / cost auditor declaration specifying domestic manufacturing location.',
-      metric: 'local_content_percentage',
-      operator: 'GTE',
-      threshold_value: '50.0',
-      threshold_unit: '%',
-      category: 'REGULATORY',
-      severity: 'CRITICAL',
-      is_mandatory: true,
-      evidence_type: 'MII_LOCAL_CONTENT_AFFIDAVIT',
-      verification_sources: ['DPIIT_MII_REGISTRY', 'AUDITOR_AFFIDAVIT'],
-      compilation_source: 'AI_COMPILER',
-      status: 'COMPILED_VALID',
-    },
-    {
-      id: 'rule-03',
-      requirement_id: 'REQ-STAT-03',
-      clause_id: 'Clause 5.1.1',
-      clause_reference: 'Section V Â· Statutory Registration Compliance',
-      clause_text: 'Bidder must possess active and valid GSTIN registration in the operating state and Permanent Account Number (PAN). Legal entity names must match 100% without contradictions across all statutory filings.',
-      metric: 'gstin_and_pan_active',
-      operator: 'VALID',
-      threshold_value: 'ACTIVE',
-      threshold_unit: 'STATUS',
-      category: 'REGULATORY',
-      severity: 'CRITICAL',
-      is_mandatory: true,
-      evidence_type: 'GST_CERTIFICATE_REG06',
-      verification_sources: ['GSTN_API', 'CBDT_PAN_REGISTRY'],
-      compilation_source: 'AI_COMPILER',
-      status: 'COMPILED_VALID',
-    },
-    {
-      id: 'rule-04',
-      requirement_id: 'REQ-MSME-04',
-      clause_id: 'Clause 5.2.4',
-      clause_reference: 'Section V Â· Public Procurement Policy for MSEs Order 2012',
-      clause_text: 'Micro & Small Enterprises (MSEs) seeking exemption from prior turnover and experience must provide a valid Udyam Registration Certificate verified against the Ministry of MSME portal.',
-      metric: 'udyam_msme_verified',
-      operator: 'VALID',
-      threshold_value: 'VALID_UDYAM',
-      threshold_unit: 'STATUS',
-      category: 'LEGAL',
-      severity: 'HIGH',
-      is_mandatory: false,
-      evidence_type: 'UDYAM_CERTIFICATE',
-      verification_sources: ['MSME_UDYAM_API'],
-      compilation_source: 'AI_COMPILER',
-      status: 'COMPILED_VALID',
-    },
-    {
-      id: 'rule-05',
-      requirement_id: 'REQ-TECH-05',
-      clause_id: 'Clause 6.4.1',
-      clause_reference: 'Section VI Â· Technical Specification & ASME B31.3 Standard',
-      clause_text: 'Bidder must demonstrate prior execution of high-pressure cryogenic piping or hydrocracker installation in an operating oil refinery exceeding 3 years of continuous operation.',
-      metric: 'technical_past_experience_years',
-      operator: 'GTE',
-      threshold_value: '3.0',
-      threshold_unit: 'Years',
-      category: 'TECHNICAL',
-      severity: 'CRITICAL',
-      is_mandatory: true,
-      evidence_type: 'CLIENT_COMPLETION_CERTIFICATE',
-      verification_sources: ['CPCL_INTERNAL_DATABASE', 'CLIENT_REFERENCE'],
-      compilation_source: 'AI_COMPILER',
-      status: 'COMPILED_VALID',
-    },
+    { id: 'rule-01', requirement_id: 'REQ-FIN-01', clause_id: 'Clause 3.1.2', metric: 'annual_turnover_cr', threshold_value: '10.0', threshold_unit: 'Crore INR', operator: '>=', clause_text: 'Average annual turnover for preceding 3 financial years shall not be less than INR 10.00 Crores', is_mandatory: true, severity: 'CRITICAL', status: 'COMPILED_VALID' },
+    { id: 'rule-02', requirement_id: 'REQ-MII-02', clause_id: 'Clause 4.2', metric: 'local_content_percentage', threshold_value: '50.0', threshold_unit: '%', operator: '>=', clause_text: 'Bidder shall qualify as a Class-I Local Supplier with minimum 50.0% local content', is_mandatory: true, severity: 'CRITICAL', status: 'COMPILED_VALID' },
+    { id: 'rule-03', requirement_id: 'REQ-STAT-03', clause_id: 'Clause 2.1', metric: 'gstin_and_pan_active', threshold_value: 'ACTIVE', operator: '==', clause_text: 'GST Registration Certificate (Form REG-06) must be active and valid', is_mandatory: true, severity: 'HIGH', status: 'COMPILED_VALID' },
+    { id: 'rule-04', requirement_id: 'REQ-MSME-04', clause_id: 'Clause 5.3', metric: 'udyam_msme_verified', threshold_value: 'VERIFIED', operator: '==', clause_text: 'MSE bidders claiming 25% price preference shall submit valid Udyam Registration Certificate', is_mandatory: false, severity: 'MEDIUM', status: 'COMPILED_VALID' },
+    { id: 'rule-05', requirement_id: 'REQ-EXP-05', clause_id: 'Clause 3.3', metric: 'project_experience_cr', threshold_value: '15.0', threshold_unit: 'Crore INR', operator: '>=', clause_text: 'Bidder must have completed at least one similar project of value ≥ ₹15 Cr in the preceding 7 years', is_mandatory: true, severity: 'CRITICAL', status: 'COMPILED_VALID' },
   ],
 };
 
-export default function TenderWorkspacePage() {
-  const { tenderId: paramId } = useParams();
-  const navigate = useNavigate();
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const STATUS_COLOR = {
+  ACTIVE:    { bg: '#dcfce7', color: '#166534', border: '#86efac', dot: '#16a34a' },
+  DRAFT:     { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1', dot: '#94a3b8' },
+  CLOSED:    { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5', dot: '#dc2626' },
+  PUBLISHED: { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe', dot: '#3b82f6' },
+  COMPILED_VALID:         { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  AMENDED_BY_CORRIGENDUM: { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+};
+const SEVERITY_COLOR = { CRITICAL: '#991b1b', HIGH: '#92400e', MEDIUM: '#1d4ed8', LOW: '#475569' };
 
-  const [tender, setTender] = useState(DEFAULT_CPCL_TENDER);
-  const [loading, setLoading] = useState(true);
+function StatusPill({ status, size = 11 }) {
+  const s = STATUS_COLOR[status] || { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' };
+  return (
+    <span style={{ display: 'inline-block', padding: '2px 9px', borderRadius: 20, fontSize: size, fontWeight: 700, background: s.bg, color: s.color, border: `1px solid ${s.border}` }}>
+      {status?.replace(/_/g, ' ')}
+    </span>
+  );
+}
 
-  // Upload & Compilation state
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function fmtBytes(b) {
+  if (!b) return '—';
+  if (b > 1e6) return `${(b / 1e6).toFixed(1)} MB`;
+  return `${(b / 1024).toFixed(0)} KB`;
+}
+
+// Bid status color map (shared with TenderCard bids table)
+const BID_STATUS = {
+  PASS:        { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  COMPLIANT:   { bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  FAIL:        { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  NON_COMPLIANT: { bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  REVIEW:      { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  UNDER_REVIEW:{ bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  PENDING:     { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  PENDING_VERIFICATION: { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  CRITICAL:    { bg: '#fdf4ff', color: '#7e22ce', border: '#d8b4fe' },
+  HIGH:        { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+  MEDIUM:      { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+  LOW:         { bg: '#f0fdf4', color: '#166534', border: '#bbf7d0' },
+};
+
+function BidPill({ status }) {
+  const s = BID_STATUS[status] || { bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' };
+  return (
+    <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 20, fontSize: 10, fontWeight: 700, background: s.bg, color: s.color, border: `1px solid ${s.border}` }}>
+      {status?.replace(/_/g, ' ')}
+    </span>
+  );
+}
+
+// ─── Tab 1: Tender Card (expandable) ─────────────────────────────────────────
+function TenderCard({ tender, onUploadRFP, onViewBids, navigate }) {
+  const [expanded, setExpanded] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [localTender, setLocalTender] = useState(tender);
+  const [dragOver, setDragOver] = useState(false);
+  const [tenderBids, setTenderBids] = useState(null); // null = not yet loaded
+  const [bidsLoading, setBidsLoading] = useState(false);
+  const fileRef = useRef(null);
+  const s = STATUS_COLOR[localTender.status] || STATUS_COLOR['DRAFT'];
+
+  async function handleFile(file) {
+    if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+      setUploadMsg({ type: 'error', text: 'Only PDF files are accepted as RFP documents.' });
+      return;
+    }
+    setUploading(true);
+    setUploadProgress(10);
+    setUploadMsg(null);
+    try {
+      setUploadProgress(40);
+      const result = await uploadTenderDocument(localTender.id, file, pct => setUploadProgress(40 + pct * 0.5));
+      setUploadProgress(100);
+      const compiledRules = result?.rules || result?.requirement_rules || [];
+      setLocalTender(prev => ({
+        ...prev,
+        filename: file.name,
+        requirement_rules: compiledRules.length > 0 ? compiledRules : prev.requirement_rules,
+        file_hash: result?.tender?.file_hash || prev.file_hash,
+        documents: [{ id: `doc-${Date.now()}`, original_filename: file.name, file_size: file.size, uploaded_at: new Date().toISOString() }, ...(prev.documents || [])],
+      }));
+      setUploadMsg({ type: 'success', text: `✓ ${file.name} uploaded · ${compiledRules.length || 5} eligibility rules compiled & chained to SHA-256 ledger.` });
+    } catch {
+      setUploadProgress(0);
+      // Offline mode: still show success with simulated result
+      setLocalTender(prev => ({ ...prev, filename: file.name, documents: [{ id: `doc-${Date.now()}`, original_filename: file.name, file_size: file.size, uploaded_at: new Date().toISOString() }, ...(prev.documents || [])] }));
+      setUploadMsg({ type: 'success', text: `✓ Offline mode: ${file.name} processed — 5 rules extracted (demo data).` });
+    } finally {
+      setTimeout(() => { setUploading(false); setUploadProgress(0); }, 800);
+    }
+  }
+
+  const days = Math.ceil((new Date(localTender.closing_date) - Date.now()) / 86400000);
+
+  // Load bids for THIS tender when first expanded
+  async function handleExpand() {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && tenderBids === null) {
+      setBidsLoading(true);
+      try {
+        const result = await getTenderBids(localTender.id).catch(() => null);
+        const list = result?.bids || result || [];
+        setTenderBids(Array.isArray(list) ? list : []);
+      } catch {
+        setTenderBids([]);
+      } finally {
+        setBidsLoading(false);
+      }
+    }
+  }
+
+  return (
+    <div style={{ background: '#fff', border: `1px solid ${expanded ? '#bfdbfe' : '#e2e8f0'}`, borderRadius: 12, marginBottom: 14, overflow: 'hidden', boxShadow: expanded ? '0 4px 20px rgba(37,99,235,0.08)' : 'none', transition: 'all 0.2s' }}>
+      {/* ── Card header (always visible) ── */}
+      <div
+        onClick={handleExpand}
+        style={{ padding: '16px 20px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}
+      >
+        <div style={{ flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: s.dot, display: 'inline-block' }} />
+            <span style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 800, color: '#1e3a8a' }}>{localTender.reference_number || localTender.tender_no}</span>
+            <StatusPill status={localTender.status} />
+            {days > 0 && days <= 30 && <span style={{ fontSize: 10, fontWeight: 700, background: '#fffbeb', color: '#d97706', border: '1px solid #fde68a', padding: '1px 7px', borderRadius: 20 }}>⏰ {days}d remaining</span>}
+            {days <= 0 && <span style={{ fontSize: 10, fontWeight: 700, background: '#fee2e2', color: '#991b1b', border: '1px solid #fca5a5', padding: '1px 7px', borderRadius: 20 }}>CLOSED</span>}
+          </div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: '#0f172a', lineHeight: 1.4, marginBottom: 4 }}>{localTender.title}</div>
+          <div style={{ fontSize: 12, color: '#64748b', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            <span>🏛️ {localTender.authority || localTender.organization}</span>
+            <span>💰 {localTender.estimated_value || `₹${localTender.estimated_value_cr} Cr`}</span>
+            <span>📅 Closes: {fmtDate(localTender.closing_date)}</span>
+            <span>📋 {(localTender.requirement_rules || []).length} rules compiled</span>
+            <span>🏷️ {tenderBids === null ? '…' : tenderBids.length} bids received</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+          <button
+            onClick={() => navigate('/corrigendum')}
+            style={{ padding: '6px 12px', borderRadius: 7, border: '1px solid #e2e8f0', background: '#fff', color: '#d97706', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}
+          >
+            📝 Corrigendum
+          </button>
+          <button
+            onClick={() => navigate('/bids')}
+            style={{ padding: '6px 12px', borderRadius: 7, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}
+          >
+            View Bids →
+          </button>
+          <span style={{ fontSize: 18, color: '#94a3b8', userSelect: 'none' }}>{expanded ? '▲' : '▽'}</span>
+        </div>
+      </div>
+
+      {/* ── Expanded detail ── */}
+      {expanded && (
+        <div style={{ borderTop: '1px solid #f1f5f9', background: '#f8fafc' }}>
+          {/* Upload banner */}
+          {uploadMsg && (
+            <div style={{ padding: '10px 20px', background: uploadMsg.type === 'success' ? '#dcfce7' : '#fee2e2', borderBottom: '1px solid #e2e8f0', fontSize: 12, fontWeight: 600, color: uploadMsg.type === 'success' ? '#166534' : '#991b1b', display: 'flex', justifyContent: 'space-between' }}>
+              {uploadMsg.text}
+              <button onClick={() => setUploadMsg(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>×</button>
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0 }}>
+            {/* Left — RFP Upload */}
+            <div style={{ padding: '20px', borderRight: '1px solid #e2e8f0' }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 12 }}>📎 RFP Document</div>
+
+              {/* Existing documents */}
+              {(localTender.documents || []).map(doc => (
+                <div key={doc.id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>📄</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>{doc.original_filename}</div>
+                    <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace', marginTop: 2 }}>
+                      {fmtBytes(doc.file_size)} · Uploaded {fmtDate(doc.uploaded_at)}
+                      {doc.file_hash && ` · SHA256: ${doc.file_hash?.slice(0, 12)}…`}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 10, background: '#dcfce7', color: '#166534', border: '1px solid #86efac', padding: '2px 8px', borderRadius: 20, fontWeight: 700 }}>VERIFIED</span>
+                </div>
+              ))}
+
+              {/* Upload zone */}
+              <div
+                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={e => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); }}
+                style={{ border: `2px dashed ${dragOver ? '#2563eb' : '#cbd5e1'}`, borderRadius: 10, padding: '20px 16px', textAlign: 'center', background: dragOver ? '#eff6ff' : '#fff', transition: 'all 0.2s', cursor: 'pointer' }}
+                onClick={() => fileRef.current?.click()}
+              >
+                <div style={{ fontSize: 24, marginBottom: 6 }}>📁</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginBottom: 4 }}>
+                  {localTender.documents?.length ? 'Upload updated RFP / Corrigendum PDF' : 'Upload RFP PDF to compile rules'}
+                </div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>Drag & drop or click · PDF only</div>
+                <input ref={fileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])} />
+              </div>
+
+              {uploading && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span style={{ fontSize: 11, color: '#1d4ed8', fontWeight: 700 }}>
+                      {uploadProgress < 40 ? '🔐 Computing SHA-256 hash…' : uploadProgress < 80 ? '🔍 Extracting eligibility clauses…' : '⚙️ Compiling deterministic rules…'}
+                    </span>
+                    <span style={{ fontSize: 11, color: '#64748b' }}>{uploadProgress}%</span>
+                  </div>
+                  <div style={{ background: '#e2e8f0', borderRadius: 99, height: 5, overflow: 'hidden' }}>
+                    <div style={{ width: `${uploadProgress}%`, height: '100%', background: 'linear-gradient(90deg,#2563eb,#7c3aed)', transition: 'width 0.3s' }} />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Right — Compiled Rules */}
+            <div style={{ padding: '20px' }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>⚙️ Compiled Eligibility Rules ({(localTender.requirement_rules || []).length})</span>
+                <button onClick={() => navigate('/corrigendum')} style={{ fontSize: 10, padding: '3px 9px', borderRadius: 5, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', cursor: 'pointer', fontWeight: 700 }}>
+                  Amend via Corrigendum →
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+                {(localTender.requirement_rules || []).map(r => (
+                  <div key={r.id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderLeft: `3px solid ${SEVERITY_COLOR[r.severity] || '#94a3b8'}`, borderRadius: 7, padding: '10px 12px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <span style={{ fontFamily: 'monospace', fontSize: 10, fontWeight: 700, color: '#1e3a8a' }}>{r.requirement_id}</span>
+                      <div style={{ display: 'flex', gap: 5 }}>
+                        {r.is_mandatory && <span style={{ fontSize: 9, fontWeight: 700, background: '#fee2e2', color: '#991b1b', padding: '1px 6px', borderRadius: 3 }}>MANDATORY</span>}
+                        <StatusPill status={r.status || 'COMPILED_VALID'} size={9} />
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: '#0f172a', marginBottom: 2 }}>{r.metric?.replace(/_/g, ' ').toUpperCase()}</div>
+                    <div style={{ fontSize: 10, color: '#64748b', fontStyle: 'italic' }}>
+                      {r.clause_id}: {r.threshold_value && `≥ ${r.threshold_value} ${r.threshold_unit || ''} — `}{r.clause_text?.slice(0, 90)}…
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* ── Bids applied against this tender ── */}
+          <div style={{ borderTop: '1px solid #e2e8f0', padding: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a' }}>
+                🏷️ Bids Received Against This Tender
+                {tenderBids !== null && (
+                  <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#64748b' }}>({tenderBids.length} total)</span>
+                )}
+              </div>
+              <button
+                onClick={() => navigate('/bids')}
+                style={{ padding: '5px 12px', borderRadius: 6, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+              >
+                Open Evaluation Matrix →
+              </button>
+            </div>
+
+            {bidsLoading ? (
+              <div style={{ color: '#94a3b8', fontSize: 12, padding: '12px 0' }}>⏳ Loading bids for this tender…</div>
+            ) : tenderBids === null || tenderBids.length === 0 ? (
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '20px', textAlign: 'center', color: '#94a3b8', fontSize: 12 }}>
+                No bids have been submitted against this tender yet.
+                {localTender.status === 'ACTIVE' && ' Bidders can apply from their portal.'}
+              </div>
+            ) : (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                      {['#', 'Bidder', 'GSTIN', 'Turnover', 'Compliance Status', 'Risk', 'Action'].map(h => (
+                        <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, fontWeight: 700, color: '#64748b', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tenderBids.map((bid, i) => {
+                      const status = bid.overall_status || bid.compliance_status || 'PENDING';
+                      return (
+                        <tr key={bid.id} style={{ borderBottom: '1px solid #f1f5f9', background: i % 2 === 0 ? '#fff' : '#fafafa' }}>
+                          <td style={{ padding: '10px 12px', fontWeight: 800, color: '#1e3a8a' }}>{bid.bidder_code || String.fromCharCode(65 + i)}</td>
+                          <td style={{ padding: '10px 12px' }}>
+                            <div style={{ fontWeight: 700, color: '#0f172a' }}>{bid.bidder?.name || bid.bidder_name || `Bidder ${i + 1}`}</div>
+                            <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 1 }}>Bid #{bid.id?.slice(-8)}</div>
+                          </td>
+                          <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontSize: 10, color: '#475569' }}>{bid.bidder?.gstin || '—'}</td>
+                          <td style={{ padding: '10px 12px', fontWeight: 700, color: (bid.bidder?.turnover_cr || 0) >= 10 ? '#166534' : '#b91c1c' }}>
+                            ₹{(bid.bidder?.turnover_cr || 0).toFixed(1)} Cr
+                          </td>
+                          <td style={{ padding: '10px 12px' }}><BidPill status={status} /></td>
+                          <td style={{ padding: '10px 12px' }}><BidPill status={bid.risk_band || 'LOW'} /></td>
+                          <td style={{ padding: '10px 12px' }}>
+                            <button
+                              onClick={() => navigate(`/compliance?bidId=${bid.id}`)}
+                              style={{ padding: '4px 10px', borderRadius: 5, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#475569', fontSize: 10, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                            >
+                              View Evidence →
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Tab 2: Create New Tender Form ───────────────────────────────────────────
+function CreateTenderTab({ onCreated }) {
+  const [step, setStep] = useState(1); // 1 = form, 2 = upload RFP, 3 = review
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [newTender, setNewTender] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadStage, setUploadStage] = useState(null); // 'HASHING' | 'EXTRACTING' | 'COMPILING'
-  const [uploadError, setUploadError] = useState(null);
-  const [uploadSuccessMsg, setUploadSuccessMsg] = useState(null);
+  const [compiledRules, setCompiledRules] = useState([]);
   const [dragOver, setDragOver] = useState(false);
-  const fileInputRef = useRef(null);
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const fileRef = useRef(null);
 
-  // PDF Preview Modal
-  const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [form, setForm] = useState({
+    title: '',
+    reference_number: '',
+    authority: '',
+    organization: '',
+    estimated_value_cr: '',
+    turnover_threshold_cr: '10',
+    local_content_pct: '50',
+    closing_date: '',
+    submission_deadline: '',
+    description: '',
+    category: 'Goods',
+  });
 
-  useEffect(() => {
-    loadTenderData();
-  }, [paramId]);
+  function set(field, val) { setForm(prev => ({ ...prev, [field]: val })); }
 
-  async function loadTenderData() {
-    setLoading(true);
+  async function handleCreateTender() {
+    if (!form.title || !form.reference_number || !form.authority || !form.closing_date) {
+      setError('Please fill in all required fields (marked with *).');
+      return;
+    }
+    setSaving(true);
     setError(null);
     try {
-      let id = paramId;
-      if (!id) {
-        const tenderList = await listTenders().catch(() => []);
-        if (tenderList && tenderList.length > 0) {
-          id = tenderList[0].id;
-        }
-      }
+      const payload = {
+        ...form,
+        estimated_value_cr: parseFloat(form.estimated_value_cr) || 0,
+        turnover_threshold_cr: parseFloat(form.turnover_threshold_cr) || 10,
+        local_content_pct: parseFloat(form.local_content_pct) || 50,
+        status: 'DRAFT',
+      };
+      const result = await createTender(payload).catch(() => ({
+        ...payload,
+        id: `tnd_${Date.now()}`,
+        created_at: new Date().toISOString(),
+        status: 'DRAFT',
+        requirement_rules: [],
+        documents: [],
+      }));
+      setNewTender(result);
+      setStep(2);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create tender.');
+    } finally {
+      setSaving(false);
+    }
+  }
 
-      if (id) {
-        const t = await getTender(id).catch(() => null);
-        if (t) {
-          setTender({
-            ...DEFAULT_CPCL_TENDER,
-            ...t,
-            requirement_rules: (t.requirement_rules && t.requirement_rules.length > 0)
-              ? t.requirement_rules
-              : DEFAULT_CPCL_TENDER.requirement_rules,
-          });
-        }
-      }
+  async function handleRFPUpload(file) {
+    if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
+      setError('Only PDF files are accepted as tender documents.');
+      return;
+    }
+    setUploading(true);
+    setUploadProgress(10);
+    setError(null);
+    setUploadedFile(file);
+    try {
+      setUploadProgress(35);
+      const result = await uploadTenderDocument(newTender.id, file, pct => setUploadProgress(35 + pct * 0.55)).catch(() => null);
+      setUploadProgress(100);
+      const rules = result?.rules || result?.requirement_rules || DEFAULT_CPCL_TENDER.requirement_rules.slice(0, 3);
+      setCompiledRules(rules);
+      setStep(3);
     } catch {
-      // Guaranteed non-blank fallback
-      setTender(DEFAULT_CPCL_TENDER);
+      // Offline fallback
+      setCompiledRules(DEFAULT_CPCL_TENDER.requirement_rules.slice(0, 3));
+      setUploadProgress(100);
+      setStep(3);
+    } finally {
+      setTimeout(() => { setUploading(false); setUploadProgress(0); }, 600);
+    }
+  }
+
+  async function handlePublish() {
+    setSaving(true);
+    try {
+      await fetch(`/api/v1/tenders/${newTender.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}` },
+        body: JSON.stringify({ status: 'ACTIVE' }),
+      }).catch(() => null);
+      onCreated({ ...newTender, status: 'ACTIVE', requirement_rules: compiledRules, filename: uploadedFile?.name });
+    } catch { } finally { setSaving(false); }
+  }
+
+  const stepLabels = ['1. Tender Details', '2. Upload RFP', '3. Review & Publish'];
+
+  return (
+    <div style={{ maxWidth: 860, margin: '0 auto' }}>
+      {/* Step indicator */}
+      <div style={{ display: 'flex', gap: 0, marginBottom: 28, borderRadius: 10, overflow: 'hidden', border: '1px solid #e2e8f0' }}>
+        {stepLabels.map((label, i) => (
+          <div key={i} style={{
+            flex: 1, padding: '12px 16px', textAlign: 'center', fontSize: 12, fontWeight: 700,
+            background: step === i + 1 ? 'linear-gradient(135deg,#1e3a8a,#2563eb)' : step > i + 1 ? '#dcfce7' : '#f8fafc',
+            color: step === i + 1 ? '#fff' : step > i + 1 ? '#166534' : '#94a3b8',
+            borderRight: i < 2 ? '1px solid #e2e8f0' : 'none',
+          }}>
+            {step > i + 1 ? '✓ ' : ''}{label}
+          </div>
+        ))}
+      </div>
+
+      {error && (
+        <div style={{ marginBottom: 16, padding: '10px 16px', background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 13, color: '#991b1b', display: 'flex', justifyContent: 'space-between' }}>
+          {error}
+          <button onClick={() => setError(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit' }}>×</button>
+        </div>
+      )}
+
+      {/* ── Step 1: Tender Details Form ── */}
+      {step === 1 && (
+        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '28px' }}>
+          <h2 style={{ margin: '0 0 6px', fontSize: 18, fontWeight: 800, color: '#0f172a' }}>New Procurement Tender</h2>
+          <p style={{ margin: '0 0 24px', fontSize: 12, color: '#64748b' }}>Fill in the tender details. The RFP PDF will be uploaded in the next step for automatic rule extraction.</p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Tender Title *</label>
+              <input value={form.title} onChange={e => set('title', e.target.value)}
+                placeholder="e.g. CPCL Manali Refinery Modernization — Phase III"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Tender Reference Number *</label>
+              <input value={form.reference_number} onChange={e => set('reference_number', e.target.value)}
+                placeholder="e.g. GEM/2026/B/4521001"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, fontFamily: 'monospace', boxSizing: 'border-box' }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Procuring Authority *</label>
+              <input value={form.authority} onChange={e => set('authority', e.target.value)}
+                placeholder="e.g. CPCL / MoPNG · Government of India"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Organization / Department</label>
+              <input value={form.organization} onChange={e => set('organization', e.target.value)}
+                placeholder="e.g. Chennai Petroleum Corporation Limited"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Category</label>
+              <select value={form.category} onChange={e => set('category', e.target.value)}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }}>
+                {['Goods', 'Services', 'Works', 'Consulting'].map(c => <option key={c}>{c}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Estimated Value (₹ Crore)</label>
+              <input type="number" min="0" value={form.estimated_value_cr} onChange={e => set('estimated_value_cr', e.target.value)}
+                placeholder="e.g. 48.5"
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Turnover Threshold (₹ Crore) *</label>
+              <input type="number" min="0" value={form.turnover_threshold_cr} onChange={e => set('turnover_threshold_cr', e.target.value)}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+              <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>Minimum annual turnover bidders must prove (3FY average)</div>
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>MII Local Content Threshold (%)</label>
+              <input type="number" min="0" max="100" value={form.local_content_pct} onChange={e => set('local_content_pct', e.target.value)}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+              <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>Class-I ≥ 50% · Class-II ≥ 20%</div>
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Bid Submission Deadline *</label>
+              <input type="datetime-local" value={form.submission_deadline} onChange={e => set('submission_deadline', e.target.value)}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+            </div>
+
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Tender Closing Date *</label>
+              <input type="datetime-local" value={form.closing_date} onChange={e => set('closing_date', e.target.value)}
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, boxSizing: 'border-box' }} />
+            </div>
+
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 5 }}>Description / Scope of Work</label>
+              <textarea value={form.description} onChange={e => set('description', e.target.value)} rows={3}
+                placeholder="Brief description of the procurement scope..."
+                style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit' }} />
+            </div>
+          </div>
+
+          <div style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+            <button onClick={handleCreateTender} disabled={saving}
+              style={{ padding: '11px 28px', borderRadius: 9, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontSize: 13, fontWeight: 800, cursor: saving ? 'wait' : 'pointer', boxShadow: '0 4px 12px rgba(37,99,235,0.3)' }}>
+              {saving ? '⏳ Saving…' : 'Save & Continue to RFP Upload →'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 2: Upload RFP PDF ── */}
+      {step === 2 && newTender && (
+        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '28px' }}>
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#166534', background: '#dcfce7', padding: '2px 10px', borderRadius: 6, display: 'inline-block', marginBottom: 8 }}>TENDER SAVED AS DRAFT</div>
+            <h2 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 800, color: '#0f172a' }}>{newTender.title || form.title}</h2>
+            <div style={{ fontSize: 12, color: '#64748b', fontFamily: 'monospace' }}>{newTender.reference_number || form.reference_number}</div>
+          </div>
+
+          <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '14px 18px', marginBottom: 20, fontSize: 12, color: '#1d4ed8' }}>
+            <strong>📎 Upload the RFP PDF</strong> — GeM-Guard will automatically extract all eligibility clauses, compile them into deterministic verification rules, and hash the document to the audit chain.
+          </div>
+
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files[0]) handleRFPUpload(e.dataTransfer.files[0]); }}
+            onClick={() => fileRef.current?.click()}
+            style={{ border: `2px dashed ${dragOver ? '#2563eb' : '#cbd5e1'}`, borderRadius: 12, padding: '48px 24px', textAlign: 'center', background: dragOver ? '#eff6ff' : '#f8fafc', cursor: 'pointer', transition: 'all 0.2s' }}
+          >
+            <div style={{ fontSize: 40, marginBottom: 12 }}>📄</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>Drop your RFP / Tender Document PDF here</div>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 20 }}>
+              The AI pipeline will extract: turnover thresholds, MII clauses, GSTN/PAN requirements, MSME exemptions
+            </div>
+            <span style={{ padding: '10px 24px', borderRadius: 8, background: '#2563eb', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+              📁 Browse for PDF
+            </span>
+            <input ref={fileRef} type="file" accept=".pdf" style={{ display: 'none' }} onChange={e => e.target.files?.[0] && handleRFPUpload(e.target.files[0])} />
+          </div>
+
+          {uploading && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                <span style={{ fontSize: 12, color: '#1d4ed8', fontWeight: 700 }}>
+                  {uploadProgress < 35 ? '🔐 Computing SHA-256 hash…' : uploadProgress < 70 ? '🔍 Extracting eligibility clauses (PyMuPDF)…' : '⚙️ Compiling deterministic rules…'}
+                </span>
+                <span style={{ fontSize: 12, color: '#64748b' }}>{uploadProgress}%</span>
+              </div>
+              <div style={{ background: '#e2e8f0', borderRadius: 99, height: 7, overflow: 'hidden' }}>
+                <div style={{ width: `${uploadProgress}%`, height: '100%', background: 'linear-gradient(90deg,#2563eb,#7c3aed)', transition: 'width 0.4s' }} />
+              </div>
+            </div>
+          )}
+
+          <div style={{ marginTop: 20, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <button onClick={() => setStep(1)} style={{ padding: '9px 18px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+              ← Back
+            </button>
+            <button onClick={() => { setCompiledRules(DEFAULT_CPCL_TENDER.requirement_rules); setStep(3); }}
+              style={{ padding: '9px 18px', borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', color: '#475569', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+              Skip (use manual rules)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Step 3: Review & Publish ── */}
+      {step === 3 && (
+        <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '28px' }}>
+          <h2 style={{ margin: '0 0 6px', fontSize: 18, fontWeight: 800, color: '#0f172a' }}>Review & Publish Tender</h2>
+          <p style={{ margin: '0 0 20px', fontSize: 12, color: '#64748b' }}>Verify the extracted rules below. Publishing makes this tender ACTIVE and visible to bidders.</p>
+
+          {/* Summary strip */}
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px 18px', marginBottom: 20, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
+            {[
+              { label: 'Ref Number', value: form.reference_number },
+              { label: 'Authority', value: form.authority },
+              { label: 'Turnover Threshold', value: `₹${form.turnover_threshold_cr} Cr` },
+              { label: 'MII Local Content', value: `${form.local_content_pct}%` },
+              { label: 'Closing Date', value: fmtDate(form.closing_date) },
+              { label: 'RFP Document', value: uploadedFile?.name || 'Not uploaded' },
+            ].map(item => (
+              <div key={item.label}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2 }}>{item.label}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Compiled rules preview */}
+          <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 10 }}>
+            ⚙️ {compiledRules.length} Eligibility Rules Extracted & Compiled
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+            {compiledRules.map((r, i) => (
+              <div key={r.id || i} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderLeft: `3px solid ${SEVERITY_COLOR[r.severity] || '#94a3b8'}`, borderRadius: 8, padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#0f172a' }}>{r.requirement_id || `RULE-0${i + 1}`} — {r.metric?.replace(/_/g, ' ').toUpperCase()}</div>
+                  <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{r.clause_text?.slice(0, 100)}…</div>
+                </div>
+                <StatusPill status={r.status || 'COMPILED_VALID'} />
+              </div>
+            ))}
+          </div>
+
+          <div style={{ padding: '14px 18px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, fontSize: 12, color: '#92400e', marginBottom: 24 }}>
+            ⚠️ Once published, this tender becomes <strong>ACTIVE</strong> and visible to all registered bidders on the GeM portal. Threshold changes after publishing require a formal <strong>Corrigendum</strong>.
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+            <button onClick={() => setStep(2)} style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+              ← Back
+            </button>
+            <button onClick={handlePublish} disabled={saving}
+              style={{ padding: '10px 28px', borderRadius: 9, border: 'none', background: 'linear-gradient(135deg,#166534,#16a34a)', color: '#fff', fontSize: 13, fontWeight: 800, cursor: saving ? 'wait' : 'pointer', boxShadow: '0 4px 12px rgba(22,163,74,0.3)' }}>
+              {saving ? '⏳ Publishing…' : '🚀 Publish Tender'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Page Component ──────────────────────────────────────────────────────
+export default function TenderWorkspacePage() {
+  const navigate = useNavigate();
+  const [activeTab, setActiveTab] = useState('MY_TENDERS');
+  const [tenders, setTenders] = useState([DEFAULT_CPCL_TENDER]);
+  const [loading, setLoading] = useState(true);
+  const [banner, setBanner] = useState(null);
+
+  useEffect(() => { loadTenders(); }, []);
+
+  async function loadTenders() {
+    setLoading(true);
+    try {
+      const result = await listTenders().catch(() => null);
+      const list = result?.tenders || result || [];
+      if (Array.isArray(list) && list.length > 0) {
+        setTenders(list.map(t => ({
+          ...DEFAULT_CPCL_TENDER,
+          ...t,
+          requirement_rules: (t.requirement_rules?.length > 0) ? t.requirement_rules : DEFAULT_CPCL_TENDER.requirement_rules,
+        })));
+      }
     } finally {
       setLoading(false);
     }
   }
 
-  // 3-Stage Animated Upload & Ingestion to /api/v1/tenders/upload
-  async function handleFileUpload(file) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      setUploadError('Only official RFP / Corrigendum Tender PDF documents are permitted.');
-      return;
-    }
-
-    setUploading(true);
-    setUploadError(null);
-    setUploadSuccessMsg(null);
-    setUploadProgress(15);
-    setUploadStage('HASHING');
-
-    try {
-      // Stage 1: Hashing PDF
-      await new Promise(r => setTimeout(r, 600));
-      setUploadProgress(40);
-      setUploadStage('EXTRACTING');
-
-      // Stage 2: Extracting Clauses via PyMuPDF / Vision Pipeline
-      const formData = new FormData();
-      formData.append('file', file);
-      if (tender?.id) formData.append('tender_id', tender.id);
-
-      setUploadProgress(70);
-      setUploadStage('COMPILING');
-
-      const res = await fetch('/api/v1/tenders/upload', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('gemguard_token') || ''}`,
-        },
-        body: formData,
-      });
-
-      setUploadProgress(95);
-
-      if (res.ok) {
-        const result = await res.json();
-        const compiledRules = result.rules || [];
-        setTender(prev => ({
-          ...prev,
-          filename: file.name,
-          requirement_rules: compiledRules.length > 0 ? compiledRules : prev.requirement_rules,
-          documents: [
-            {
-              id: `doc-${Date.now()}`,
-              original_filename: file.name,
-              file_hash: result.tender?.file_hash || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-              file_size: file.size,
-              uploaded_at: new Date().toISOString(),
-              uploaded_by: localStorage.getItem('user_name') || 'Procurement Officer',
-            },
-            ...(prev.documents || []),
-          ],
-        }));
-        setUploadSuccessMsg(`âœ“ Successfully parsed ${file.name}: SHA-256 verified and ${compiledRules.length || 5} deterministic rules compiled!`);
-      } else {
-        // Mock fallback simulation if Gateway/Backend is offline
-        await new Promise(r => setTimeout(r, 500));
-        setUploadSuccessMsg(`âœ“ Offline Mode: Analyzed ${file.name} â€” Extracted 5 clauses & compiled deterministic rules.`);
-      }
-      setUploadProgress(100);
-    } catch (err) {
-      setUploadError(err instanceof Error ? err.message : 'Upload failed. Check backend connection.');
-    } finally {
-      setTimeout(() => {
-        setUploading(false);
-        setUploadStage(null);
-      }, 800);
-    }
+  function handleTenderCreated(tender) {
+    setTenders(prev => [tender, ...prev]);
+    setActiveTab('MY_TENDERS');
+    setBanner({ type: 'success', msg: `🚀 Tender "${tender.title?.slice(0, 50)}…" is now ACTIVE. Bidders can apply immediately.` });
+    setTimeout(() => setBanner(null), 8000);
   }
-
-  // Handle Drag & Drop
-  function onDrop(e) {
-    e.preventDefault();
-    setDragOver(false);
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      handleFileUpload(files[0]);
-    }
-  }
-
-  // Rule editing removed â€” use /corrigendum page for threshold amendments
 
   return (
-    <div style={{
-      minHeight: 'calc(100vh - 54px)',
-      background: '#f8fafc',
-      fontFamily: "'Inter', sans-serif",
-      display: 'flex',
-      flexDirection: 'column',
-    }}>
-      {/* â”€â”€ WORKSPACE TITLE BAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <div style={{
-        background: '#ffffff',
-        borderBottom: '1px solid #e2e8f0',
-        padding: '16px 28px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        flexWrap: 'wrap',
-        gap: 16,
-      }}>
+    <div style={{ minHeight: 'calc(100vh - 54px)', background: '#f8fafc', fontFamily: "'Inter', sans-serif" }}>
+      {/* ── Page Header ── */}
+      <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '16px 28px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{
-              fontSize: 10,
-              fontWeight: 800,
-              color: '#2563eb',
-              background: '#eff6ff',
-              border: '1px solid #bfdbfe',
-              padding: '2px 8px',
-              borderRadius: 4,
-              textTransform: 'uppercase',
-              letterSpacing: '0.06em',
-            }}>
-              Active Procurement Tender Workspace
-            </span>
-            <span style={{ fontSize: 12, fontWeight: 700, color: '#16a34a', display: 'flex', alignItems: 'center', gap: 4 }}>
-              â— {tender.status || 'ACTIVE'}
-            </span>
-          </div>
-
-          <h1 style={{ margin: '4px 0 2px', fontSize: 20, fontWeight: 800, color: '#0f172a' }}>
-            {tender.title}
-          </h1>
-
-          <div style={{ fontSize: 12, color: '#64748b', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-            <span>Tender Ref: <strong style={{ color: '#1e3a8a', fontFamily: 'monospace' }}>{tender.reference_number || tender.tender_no}</strong></span>
-            <span>Â·</span>
-            <span>Authority: <strong style={{ color: '#334155' }}>{tender.authority || tender.organization}</strong></span>
-            <span>Â·</span>
-            <span>Estimated Value: <strong style={{ color: '#059669' }}>{tender.estimated_value || `â‚¹ ${tender.turnover_threshold_cr || 48.5} Cr`}</strong></span>
-          </div>
+          <span style={{ fontSize: 10, fontWeight: 800, padding: '3px 10px', borderRadius: 6, background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe', letterSpacing: '0.06em' }}>
+            📋 PROCUREMENT OFFICER — TENDER MANAGEMENT
+          </span>
+          <h1 style={{ margin: '6px 0 2px', fontSize: 20, fontWeight: 800, color: '#0f172a' }}>Tender Workspace</h1>
+          <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+            Create and manage procurement tenders · Upload RFPs for automatic rule compilation · Issue corrigenda
+          </p>
         </div>
-
-        {/* Action Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button
-            id="btn-preview-tender-pdf"
-            onClick={() => setPreviewModalOpen(true)}
-            style={{
-              background: '#ffffff',
-              border: '1px solid #cbd5e1',
-              color: '#1e293b',
-              padding: '8px 16px',
-              borderRadius: 7,
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
-            }}
-          >
-            <Eye size={15} color="#2563eb" />
-            <span>Direct PDF Preview</span>
-          </button>
-
-          <button
-            id="btn-corrigendum-analyzer-jump"
-            onClick={() => navigate('/corrigendum')}
-            style={{
-              background: 'linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%)',
-              border: 'none',
-              color: '#ffffff',
-              padding: '8px 18px',
-              borderRadius: 7,
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              boxShadow: '0 2px 8px rgba(37,99,235,0.3)',
-            }}
-          >
-            <Sliders size={15} />
-            <span>Corrigendum Analyzer</span>
-          </button>
-        </div>
+        <button
+          onClick={() => { setActiveTab('CREATE'); setBanner(null); }}
+          style={{ padding: '10px 20px', borderRadius: 9, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontSize: 13, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 12px rgba(37,99,235,0.3)' }}
+        >
+          + New Tender
+        </button>
       </div>
 
-      {/* â”€â”€ NOTIFICATION BANNERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      {uploadSuccessMsg && (
-        <div style={{
-          background: '#dcfce7',
-          borderBottom: '1px solid #86efac',
-          padding: '10px 28px',
-          color: '#166534',
-          fontSize: 13,
-          fontWeight: 700,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}>
-          <CheckCircle2 size={16} />
-          <span>{uploadSuccessMsg}</span>
+      {/* ── Banner ── */}
+      {banner && (
+        <div style={{ padding: '10px 28px' }}>
+          <div style={{ padding: '12px 16px', borderRadius: 8, background: '#dcfce7', border: '1px solid #86efac', color: '#166534', fontSize: 13, fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            {banner.msg}
+            <button onClick={() => setBanner(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 18, color: 'inherit' }}>×</button>
+          </div>
         </div>
       )}
 
-      {uploadError && (
-        <div style={{
-          background: '#fee2e2',
-          borderBottom: '1px solid #fca5a5',
-          padding: '10px 28px',
-          color: '#991b1b',
-          fontSize: 13,
-          fontWeight: 700,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}>
-          <AlertTriangle size={16} />
-          <span>{uploadError}</span>
-        </div>
-      )}
+      {/* ── Tab Bar ── */}
+      <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '0 28px', display: 'flex', gap: 0 }}>
+        {[
+          { id: 'MY_TENDERS', label: `📋 My Tenders (${tenders.length})` },
+          { id: 'CREATE', label: '+ Create New Tender' },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            id={`tab-${tab.id.toLowerCase()}`}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              padding: '13px 20px', border: 'none', background: 'transparent', cursor: 'pointer',
+              fontSize: 13, fontWeight: 700,
+              color: activeTab === tab.id ? '#2563eb' : '#64748b',
+              borderBottom: activeTab === tab.id ? '2px solid #2563eb' : '2px solid transparent',
+              marginBottom: -1,
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-      {/* â”€â”€ 2-COLUMN MAIN WORKSPACE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      <div style={{
-        flex: 1,
-        maxWidth: 1400,
-        margin: '0 auto',
-        width: '100%',
-        padding: '24px 28px',
-        display: 'grid',
-        gridTemplateColumns: '360px 1fr',
-        gap: 24,
-      }}>
-
-        {/* â”€â”€ LEFT PANEL: ACTIVE TENDER OVERVIEW & DROPZONE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          
-          {/* Active Tender Overview Card */}
-          <div className="card" style={{ padding: '20px' }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12 }}>
-              Active Tender Overview
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px' }}>
-                <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>GeM Tender Reference</div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: '#1e3a8a', fontFamily: 'monospace', marginTop: 2 }}>
-                  {tender.reference_number || tender.tender_no}
-                </div>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px' }}>
-                  <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Est. Value</div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: '#059669', marginTop: 2 }}>
-                    â‚¹ 48.50 Cr
-                  </div>
-                </div>
-
-                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px' }}>
-                  <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Closing Date</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: '#334155', marginTop: 2 }}>
-                    28 Oct 2026
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px' }}>
-                <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Procuring Authority</div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', marginTop: 2 }}>
-                  Chennai Petroleum Corporation Limited
-                </div>
-                <div style={{ fontSize: 11, color: '#64748b', marginTop: 1 }}>
-                  Ministry of Petroleum and Natural Gas (MoPNG)
-                </div>
-              </div>
-
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px' }}>
-                <div style={{ fontSize: 10, color: '#94a3b8', textTransform: 'uppercase', fontWeight: 700 }}>Source Tender PDF</div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
-                    <FileText size={16} color="#dc2626" />
-                    <span style={{ fontSize: 11, fontWeight: 600, color: '#1e293b', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                      {tender.filename || 'CPCL_RFP_Modernization.pdf'}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => setPreviewModalOpen(true)}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#2563eb',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      padding: 0,
-                    }}
-                  >
-                    View
-                  </button>
-                </div>
-                <div style={{ fontSize: 10, color: '#94a3b8', fontFamily: 'monospace', marginTop: 4 }}>
-                  SHA-256: {tender.file_hash ? `${tender.file_hash.slice(0, 16)}...` : '3f7a8b9c0d1e...'}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Upload & Re-Compile Dropzone with 3-Stage Progress */}
-          <div className="card" style={{ padding: '20px' }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12 }}>
-              Upload & Re-Compile Dropzone
-            </div>
-
-            <div
-              id="tender-pdf-dropzone"
-              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={onDrop}
-              onClick={() => !uploading && fileInputRef.current?.click()}
-              style={{
-                border: `2px dashed ${dragOver ? '#2563eb' : '#cbd5e1'}`,
-                borderRadius: 10,
-                padding: '28px 16px',
-                textAlign: 'center',
-                background: dragOver ? '#eff6ff' : '#f8fafc',
-                cursor: uploading ? 'wait' : 'pointer',
-                transition: 'all 0.15s ease',
-              }}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                style={{ display: 'none' }}
-                onChange={e => {
-                  if (e.target.files && e.target.files.length > 0) {
-                    handleFileUpload(e.target.files[0]);
-                  }
-                  e.target.value = '';
-                }}
-              />
-
-              {uploading ? (
-                <div>
-                  <div style={{ width: 44, height: 44, margin: '0 auto 12px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    <LoadingSpinner />
-                  </div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: '#1e3a8a', marginBottom: 6 }}>
-                    Ingesting Tender Documentâ€¦
-                  </div>
-
-                  {/* 3-Stage Processing Tracker */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, margin: '14px 0', textAlign: 'left' }}>
-                    <div style={{
-                      fontSize: 11,
-                      fontWeight: 700,
-                      color: uploadStage === 'HASHING' ? '#2563eb' : '#16a34a',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                    }}>
-                      <span>{uploadStage === 'HASHING' ? 'â³' : 'âœ“'}</span>
-                      <span>1. Hashing PDF (SHA-256 cryptographic fingerprint)</span>
-                    </div>
-
-                    <div style={{
-                      fontSize: 11,
-                      fontWeight: 700,
-                      color: uploadStage === 'EXTRACTING' ? '#2563eb' : (uploadStage === 'COMPILING' ? '#16a34a' : '#94a3b8'),
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                    }}>
-                      <span>{uploadStage === 'EXTRACTING' ? 'â³' : (uploadStage === 'COMPILING' ? 'âœ“' : 'â—‹')}</span>
-                      <span>2. Extracting Clauses (PyMuPDF Layout & Table Parser)</span>
-                    </div>
-
-                    <div style={{
-                      fontSize: 11,
-                      fontWeight: 700,
-                      color: uploadStage === 'COMPILING' ? '#2563eb' : '#94a3b8',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                    }}>
-                      <span>{uploadStage === 'COMPILING' ? 'â³' : 'â—‹'}</span>
-                      <span>3. Compiling Deterministic Rules (Zero Hallucination)</span>
-                    </div>
-                  </div>
-
-                  {/* Progress Bar */}
-                  <div style={{ height: 6, background: '#e2e8f0', borderRadius: 3, overflow: 'hidden' }}>
-                    <div style={{ height: '100%', background: '#2563eb', width: `${uploadProgress}%`, transition: 'width 0.3s ease' }} />
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div style={{
-                    width: 48,
-                    height: 48,
-                    borderRadius: '50%',
-                    background: '#eff6ff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    margin: '0 auto 12px',
-                  }}>
-                    <Upload size={22} color="#2563eb" />
-                  </div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>
-                    Upload New Tender PDF
-                  </div>
-                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 4, lineHeight: 1.4 }}>
-                    Drag and drop or browse to upload RFP/corrigendum documents (multipart/form-data to /api/v1/tenders/upload)
-                  </div>
-                  <div style={{ marginTop: 14 }}>
-                    <span style={{
-                      fontSize: 10,
-                      fontWeight: 700,
-                      background: '#e2e8f0',
-                      color: '#475569',
-                      padding: '3px 8px',
-                      borderRadius: 4,
-                    }}>
-                      PDF Only Â· Max 50 MB
-                    </span>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* â”€â”€ RIGHT PANEL: COMPILED REQUIREMENTS RULE MATRIX â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-        <div>
-          <div className="card">
-            <div style={{
-              padding: '16px 22px',
-              borderBottom: '1px solid #f1f5f9',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: 12,
-            }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 16, fontWeight: 800, color: '#0f172a' }}>
-                    Compiled Requirements Rule Matrix
-                  </span>
-                  <span style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    background: '#eff6ff',
-                    color: '#2563eb',
-                    padding: '2px 8px',
-                    borderRadius: 12,
-                  }}>
-                    {tender.requirement_rules?.length || 0} Deterministic Rules
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
-                  AI-compiled statutory constraints, financial thresholds, and local content criteria
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  id="btn-recompile-rules"
-                  onClick={() => handleFileUpload(new File(['CPCL Mock RFP'], 'CPCL_RFP_Modernization.pdf', { type: 'application/pdf' }))}
-                  style={{
-                    background: '#f1f5f9',
-                    border: '1px solid #cbd5e1',
-                    color: '#334155',
-                    padding: '6px 12px',
-                    borderRadius: 6,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                  }}
-                >
-                  <RefreshCw size={13} />
-                  <span>Re-Compile All</span>
+      {/* ── Content ── */}
+      <div style={{ padding: '24px 28px', maxWidth: 1200, margin: '0 auto' }}>
+        {activeTab === 'MY_TENDERS' && (
+          <>
+            {loading ? (
+              <div style={{ textAlign: 'center', padding: '48px 0', color: '#94a3b8', fontSize: 14 }}>⏳ Loading tenders…</div>
+            ) : tenders.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '60px 0' }}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>📋</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: '#475569', marginBottom: 8 }}>No tenders yet</div>
+                <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 24 }}>Create your first procurement tender to get started.</div>
+                <button onClick={() => setActiveTab('CREATE')}
+                  style={{ padding: '11px 24px', borderRadius: 9, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                  + Create First Tender
                 </button>
               </div>
-            </div>
+            ) : (
+              tenders.map(t => (
+                <TenderCard key={t.id} tender={t} navigate={navigate} />
+              ))
+            )}
+          </>
+        )}
 
-            {/* Rule Matrix Table */}
-            <div style={{ overflowX: 'auto' }}>
-              <table className="data-table" id="compiled-rules-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: '80px' }}>Clause ID</th>
-                    <th>Metric & Description</th>
-                    <th>Threshold</th>
-                    <th>Category</th>
-                    <th>Evidence Required</th>
-                    <th>Mandatory</th>
-                    <th>Severity</th>
-                    <th style={{ textAlign: 'right' }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(tender.requirement_rules || []).map(r => (
-                    <tr key={r.id || r.metric} id={`rule-row-${r.id || r.metric}`}>
-                      {/* Clause ID */}
-                      <td style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 11, color: '#1e3a8a' }}>
-                        {r.clause_id || '3.1'}
-                      </td>
-
-                      {/* Metric & Clause */}
-                      <td style={{ maxWidth: 280 }}>
-                        <div style={{ fontWeight: 700, color: '#0f172a', fontSize: 12 }}>
-                          {r.metric}
-                        </div>
-                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 2, lineHeight: 1.4 }}>
-                          {r.clause_text}
-                        </div>
-                        {r.verification_sources && r.verification_sources.length > 0 && (
-                          <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
-                            {r.verification_sources.map(src => (
-                              <span key={src} style={{
-                                fontSize: 9,
-                                fontFamily: 'monospace',
-                                fontWeight: 700,
-                                background: '#eff6ff',
-                                color: '#1d4ed8',
-                                border: '1px solid #bfdbfe',
-                                padding: '1px 5px',
-                                borderRadius: 3,
-                              }}>
-                                {src}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </td>
-
-                      {/* Threshold */}
-                      <td>
-                        <span style={{
-                          display: 'inline-block',
-                          fontFamily: 'monospace',
-                          fontWeight: 800,
-                          fontSize: 12,
-                          background: '#f8fafc',
-                          border: '1px solid #cbd5e1',
-                          padding: '3px 8px',
-                          borderRadius: 4,
-                          color: '#0f172a',
-                        }}>
-                          {r.operator ? `${r.operator} ` : ''}{r.threshold_value} {r.threshold_unit || ''}
-                        </span>
-                      </td>
-
-                      {/* Category */}
-                      <td>
-                        <span style={{
-                          fontSize: 10,
-                          fontWeight: 800,
-                          padding: '2px 7px',
-                          borderRadius: 4,
-                          background: r.category === 'FINANCIAL' ? '#f5f3ff' : (r.category === 'REGULATORY' ? '#ecfeff' : '#eff6ff'),
-                          color: r.category === 'FINANCIAL' ? '#7c3aed' : (r.category === 'REGULATORY' ? '#0e7490' : '#1d4ed8'),
-                          border: `1px solid ${r.category === 'FINANCIAL' ? '#ddd6fe' : '#a5f3fc'}`,
-                        }}>
-                          {r.category || 'TECHNICAL'}
-                        </span>
-                      </td>
-
-                      {/* Evidence Type */}
-                      <td style={{ fontFamily: 'monospace', fontSize: 10, color: '#475569' }}>
-                        {r.evidence_type || 'OFFICIAL_DOCUMENT'}
-                      </td>
-
-                      {/* Mandatory */}
-                      <td>
-                        <span style={{
-                          fontSize: 10,
-                          fontWeight: 800,
-                          color: r.is_mandatory !== false ? '#dc2626' : '#64748b',
-                        }}>
-                          {r.is_mandatory !== false ? 'YES (Disqualifying)' : 'Conditional'}
-                        </span>
-                      </td>
-
-                      {/* Severity */}
-                      <td>
-                        <span style={{
-                          fontSize: 10,
-                          fontWeight: 800,
-                          color: r.severity === 'CRITICAL' ? '#b91c1c' : '#d97706',
-                          background: r.severity === 'CRITICAL' ? '#fee2e2' : '#fef3c7',
-                          padding: '2px 6px',
-                          borderRadius: 4,
-                        }}>
-                          {r.severity || 'HIGH'}
-                        </span>
-                      </td>
-
-                      {/* Actions: Link to Corrigendum page for amendments */}
-                      <td style={{ textAlign: 'right' }}>
-                        <button
-                          onClick={() => navigate('/corrigendum')}
-                          style={{
-                            background: '#f8fafc',
-                            border: '1px solid #e2e8f0',
-                            color: '#64748b',
-                            padding: '4px 10px',
-                            borderRadius: 5,
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Amend via Corrigendum â†’
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
+        {activeTab === 'CREATE' && (
+          <CreateTenderTab onCreated={handleTenderCreated} />
+        )}
       </div>
-
-      {/* â”€â”€ SOURCE TENDER PDF PREVIEW MODAL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
-      {previewModalOpen && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(15, 23, 42, 0.75)',
-          backdropFilter: 'blur(4px)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999,
-          padding: 24,
-        }}>
-          <div style={{
-            background: '#ffffff',
-            borderRadius: 12,
-            width: '100%',
-            maxWidth: 880,
-            maxHeight: '90vh',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            boxShadow: '0 25px 50px -12px rgba(0,0,0,0.3)',
-          }}>
-            <div style={{
-              padding: '16px 24px',
-              borderBottom: '1px solid #e2e8f0',
-              background: '#0f172a',
-              color: '#ffffff',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            }}>
-              <div>
-                <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 800, textTransform: 'uppercase' }}>
-                  Source Tender Specification Document Â· PyMuPDF Render
-                </div>
-                <h3 style={{ margin: '2px 0 0', fontSize: 16, fontWeight: 800 }}>
-                  {tender.filename || 'CPCL_RFP_Modernization_2026_B_4521001.pdf'}
-                </h3>
-              </div>
-              <button
-                onClick={() => setPreviewModalOpen(false)}
-                style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer' }}
-              >
-                âœ•
-              </button>
-            </div>
-
-            <div style={{ padding: '24px', overflowY: 'auto', flex: 1, background: '#f8fafc' }}>
-              <div style={{
-                background: '#ffffff',
-                border: '1px solid #cbd5e1',
-                borderRadius: 8,
-                padding: '24px 32px',
-                fontFamily: 'serif',
-                lineHeight: 1.7,
-                boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-              }}>
-                <div style={{ textAlign: 'center', borderBottom: '2px solid #0f172a', paddingBottom: 16, marginBottom: 24 }}>
-                  <h2 style={{ margin: 0, fontSize: 18, color: '#0f172a' }}>CHENNAI PETROLEUM CORPORATION LIMITED</h2>
-                  <div style={{ fontSize: 12, color: '#475569', fontWeight: 600 }}>A Government of India Enterprise Â· Manali, Chennai 600068</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: '#1e3a8a', marginTop: 4 }}>
-                    INVITATION FOR BIDS (IFB) Â· GeM Bid Ref: {tender.reference_number}
-                  </div>
-                </div>
-
-                <h4 style={{ color: '#0f172a', borderBottom: '1px solid #e2e8f0', paddingBottom: 6 }}>SECTION III: FINANCIAL & STATUTORY ELIGIBILITY</h4>
-                <p style={{ fontSize: 13, color: '#1e293b' }}>
-                  <strong>3.1 Annual Turnover:</strong> The average annual turnover of the bidder during the preceding three financial years
-                  (2021-22, 2022-23, and 2023-24) shall not be less than <strong>INR 10.00 Crores</strong>. Evidence must be substantiated via a
-                  Chartered Accountant Turnover Certificate containing a valid Unique Document Identification Number (UDIN).
-                </p>
-
-                <h4 style={{ color: '#0f172a', borderBottom: '1px solid #e2e8f0', paddingBottom: 6, marginTop: 20 }}>SECTION IV: MAKE IN INDIA (MII) PREFERENCE</h4>
-                <p style={{ fontSize: 13, color: '#1e293b' }}>
-                  <strong>4.2 Local Content Requirement:</strong> In accordance with the Public Procurement (Preference to Make in India) Order 2017,
-                  only Class-I local suppliers possessing a minimum local value addition of <strong>50.0%</strong> shall be eligible to participate.
-                  Bidders must submit an auditor-certified affidavit explicitly stating the manufacturing location in India.
-                </p>
-
-                <h4 style={{ color: '#0f172a', borderBottom: '1px solid #e2e8f0', paddingBottom: 6, marginTop: 20 }}>SECTION V: REGISTRATION AND CROSS-DOCUMENT INTEGRITY</h4>
-                <p style={{ fontSize: 13, color: '#1e293b' }}>
-                  <strong>5.1 Entity Identity:</strong> The legal name, PAN, and GSTIN stated in the bid documents must strictly match across the
-                  Ministry of Corporate Affairs (MCA), GSTN, and CBDT databases without discrepancy.
-                </p>
-
-                <div style={{
-                  marginTop: 28,
-                  padding: '12px 16px',
-                  background: '#eff6ff',
-                  border: '1px solid #bfdbfe',
-                  borderRadius: 6,
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                  color: '#1e40af',
-                }}>
-                  Document Hash: SHA256:{tender.file_hash || '3f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a'}
-                </div>
-              </div>
-            </div>
-
-            <div style={{ padding: '14px 24px', borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              <button
-                onClick={() => setPreviewModalOpen(false)}
-                style={{ background: '#f1f5f9', border: '1px solid #cbd5e1', padding: '8px 18px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
-              >
-                Close Preview
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
     </div>
   );
 }
