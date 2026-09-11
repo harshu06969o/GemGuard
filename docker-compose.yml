@@ -1,0 +1,79 @@
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: gemguard-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - gemguard-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gemguard-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      USE_REAL_MONGO: "1"
+      MONGO_URI: mongodb://mongo:27017/gem_guard
+      PORT: "8001"
+    ports:
+      - "${PORT:-8001}:8001"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks:
+      - gemguard-net
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: gemguard-gateway
+    restart: unless-stopped
+    env_file:
+      - ./api-gateway/.env
+    environment:
+      PORT: "3000"
+      BACKEND_URL: http://backend:8001
+      FRONTEND_URL: http://frontend:5173
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - gemguard-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gemguard-frontend
+    restart: unless-stopped
+    env_file:
+      - ./frontend/.env
+    environment:
+      VITE_API_URL: http://api-gateway:3000/api/v1
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api-gateway
+    networks:
+      - gemguard-net
+
+networks:
+  gemguard-net:
+    driver: bridge
+
+volumes:
+  mongo_data:

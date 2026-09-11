@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+.git
+.env
+.env.*
+!.env.example
+dist
+**/*.md
+docs
+sample_documents
+ai-worker
+data

@@ -1,0 +1,21 @@
+{
+  "name": "gem-guard",
+  "version": "3.0.0",
+  "description": "GeM-Guard — Bid Compliance Verification Platform",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --kill-others --names \"GATEWAY,BACKEND,FRONTEND\" --prefix-colors \"blue,cyan,magenta\" \"npm run dev:gateway\" \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:gateway": "cd api-gateway && npm run dev",
+    "dev:backend": "cd backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload",
+    "dev:frontend": "cd frontend && npm run dev",
+    "install:all": "npm install && cd api-gateway && npm install && cd ../frontend && npm install",
+    "setup": "npm run install:all && cd backend && pip install -r requirements.txt",
+    "build": "cd frontend && npm run build",
+    "docker:up": "docker compose up --build",
+    "docker:down": "docker compose down"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3"
+  }
+}
