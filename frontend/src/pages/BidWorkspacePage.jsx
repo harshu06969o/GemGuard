@@ -16,11 +16,11 @@
  *  ✗ Audit chain  (→ /audit)
  */
 
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { listBids, evaluateBid, listTenders } from '../api/client';
+import { useEffect, useState, useCallback } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { listBids, evaluateBid, listTenders, getTenderBids } from '../api/client';
 
-// ─── Fallback benchmark data ──────────────────────────────────────────────────
+// ─── Fallback benchmark data (strictly for benchmark tender GEM/2026/B/4521001) ───
 const FALLBACK_BIDS = [
   {
     id: 'bid_001', bidder_code: 'A', bidder_name: 'Bharat Piping & Infrastructure Ltd',
@@ -130,29 +130,79 @@ function ScoreBar({ score }) {
 
 export default function BidWorkspacePage() {
   const navigate = useNavigate();
-  const [bids, setBids] = useState(FALLBACK_BIDS);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryTenderId = searchParams.get('tenderId') || '';
+
+  const [tenders, setTenders] = useState([]);
+  const [selectedTenderId, setSelectedTenderId] = useState(queryTenderId);
   const [tender, setTender] = useState(null);
+  const [bids, setBids] = useState([]);
   const [loading, setLoading] = useState(false);
   const [evaluating, setEvaluating] = useState({});
   const [expandedBid, setExpandedBid] = useState(null);
   const [banner, setBanner] = useState(null);
 
-  useEffect(() => { loadData(); }, []);
-
-  async function loadData() {
+  const loadData = useCallback(async (targetTenderId) => {
     setLoading(true);
     try {
-      const [remoteBids, remoteTenders] = await Promise.allSettled([listBids(), listTenders()]);
-      if (remoteBids.status === 'fulfilled') {
-        const list = remoteBids.value?.bids || remoteBids.value || [];
-        if (Array.isArray(list) && list.length > 0) setBids(list);
-      }
-      if (remoteTenders.status === 'fulfilled') {
-        const list = remoteTenders.value?.tenders || remoteTenders.value || [];
-        if (Array.isArray(list) && list.length > 0) setTender(list[0]);
+      // 1. Fetch all tenders for dropdown
+      const tendersRes = await listTenders().catch(() => null);
+      const tenderList = tendersRes?.tenders || (Array.isArray(tendersRes) ? tendersRes : []);
+      setTenders(tenderList);
+
+      const activeId = targetTenderId !== undefined ? targetTenderId : selectedTenderId;
+
+      if (activeId) {
+        // Find matching tender object
+        const matched = tenderList.find(t =>
+          (t.id && t.id === activeId) ||
+          (t._id && t._id === activeId) ||
+          (t.tender_no && t.tender_no === activeId) ||
+          (t.reference_number && t.reference_number === activeId)
+        );
+        setTender(matched || { id: activeId, reference_number: activeId, title: `Tender ${activeId}` });
+
+        // Fetch bids strictly for this tender
+        const bidsRes = await getTenderBids(activeId).catch(() => null);
+        const list = bidsRes?.bids || (Array.isArray(bidsRes) ? bidsRes : []);
+        if (Array.isArray(list)) {
+          // If 0 bids, set empty array (NEVER leak fallback bids to newly created tenders!)
+          setBids(list);
+        } else if (activeId.includes('4521001')) {
+          setBids(FALLBACK_BIDS);
+        } else {
+          setBids([]);
+        }
+      } else {
+        // No specific tender selected: load all bids
+        setTender(null);
+        const bidsRes = await listBids().catch(() => null);
+        const list = bidsRes?.bids || (Array.isArray(bidsRes) ? bidsRes : []);
+        if (Array.isArray(list) && list.length > 0) {
+          setBids(list);
+        } else if (tenderList.length === 0) {
+          setBids(FALLBACK_BIDS);
+        } else {
+          setBids([]);
+        }
       }
     } finally {
       setLoading(false);
+    }
+  }, [selectedTenderId]);
+
+  useEffect(() => {
+    setSelectedTenderId(queryTenderId);
+    loadData(queryTenderId);
+  }, [queryTenderId, loadData]);
+
+  function handleTenderSelect(e) {
+    const nextId = e.target.value;
+    setSelectedTenderId(nextId);
+    if (nextId) {
+      setSearchParams({ tenderId: nextId });
+    } else {
+      setSearchParams({});
     }
   }
 
@@ -168,7 +218,7 @@ export default function BidWorkspacePage() {
         ));
         setBanner({ type: 'success', msg: `✓ Evaluation complete for ${bid.bidder?.name || bid.bidder_name}: ${result.overall_status}` });
       } else {
-        setBanner({ type: 'warning', msg: `Offline mode: evaluation not committed. Current status shown from fallback data.` });
+        setBanner({ type: 'warning', msg: `Offline mode: evaluation not committed. Current status shown.` });
       }
     } catch {
       setBanner({ type: 'error', msg: 'Evaluation failed.' });
@@ -185,22 +235,59 @@ export default function BidWorkspacePage() {
   return (
     <div style={{ minHeight: 'calc(100vh - 54px)', background: '#f8fafc', fontFamily: "'Inter', sans-serif", padding: '24px 28px', maxWidth: 1400, margin: '0 auto' }}>
 
-      {/* ─── Header ─────────────────────────────────────────────────────────── */}
-      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '20px 24px', marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+      {/* ─── Header & Tender Filter Selector ─────────────────────────────────── */}
+      <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, padding: '20px 24px', marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
         <div>
           <span style={{ fontSize: 10, fontWeight: 800, padding: '3px 10px', borderRadius: 6, background: '#dbeafe', color: '#1d4ed8', border: '1px solid #93c5fd', letterSpacing: '0.06em' }}>
             🔵 TECHNICAL EVALUATOR
           </span>
           <h1 style={{ margin: '6px 0 2px', fontSize: 22, fontWeight: 800, color: '#0f172a' }}>Bid Compliance Matrix</h1>
           <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
-            {tender ? `${tender.reference_number || tender.title}` : 'GEM/2026/B/4521001 · CPCL Refinery Modernization'}
-            {' '}· {total} bids evaluated
+            {tender ? `${tender.reference_number || tender.tender_no || tender.title}` : 'All Procurement Tenders'}
+            {' '}· <strong style={{ color: '#0f172a' }}>{total}</strong> bids received for this scope
           </p>
         </div>
-        <button onClick={loadData} disabled={loading}
-          style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 12, cursor: 'pointer' }}>
-          {loading ? '⏳' : '🔄'} Refresh
-        </button>
+
+        {/* Tender Scoping Selector */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#475569', display: 'block', marginBottom: 4 }}>
+              Active Tender Scope:
+            </label>
+            <select
+              value={selectedTenderId}
+              onChange={handleTenderSelect}
+              style={{
+                padding: '8px 12px', borderRadius: 8, border: '1.5px solid #cbd5e1',
+                fontSize: 12, fontWeight: 700, background: '#fff', color: '#0f172a',
+                minWidth: 280, cursor: 'pointer', outline: 'none',
+              }}
+            >
+              <option value="">🌐 All Tenders Combined ({tenders.length} total)</option>
+              {tenders.map(t => {
+                const tId = t.id || t._id || t.tender_no;
+                const ref = t.reference_number || t.tender_no || t.title;
+                return (
+                  <option key={tId} value={tId}>
+                    {ref} {t.title ? `— ${t.title.slice(0, 32)}…` : ''}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+
+          <button
+            onClick={() => loadData(selectedTenderId)}
+            disabled={loading}
+            style={{
+              padding: '8px 16px', borderRadius: 8, border: '1px solid #e2e8f0',
+              background: '#f8fafc', color: '#475569', fontSize: 12, fontWeight: 700,
+              cursor: loading ? 'wait' : 'pointer', alignSelf: 'flex-end',
+            }}
+          >
+            {loading ? '⏳ Loading…' : '🔄 Refresh Bids'}
+          </button>
+        </div>
       </div>
 
       {/* ─── Banner ──────────────────────────────────────────────────────────── */}
@@ -236,23 +323,55 @@ export default function BidWorkspacePage() {
         ))}
       </div>
 
-      {/* ─── Bid Matrix Table ─────────────────────────────────────────────────── */}
+      {/* ─── Bid Matrix Table or Empty State ───────────────────────────────────── */}
       <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 12, overflow: 'hidden' }}>
-        <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9' }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>Compliance Evaluation Matrix</div>
-          <div style={{ fontSize: 12, color: '#64748b' }}>Click any row to expand rule-level results · Click "View Evidence" for full compliance trace</div>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
+              Compliance Evaluation Matrix
+              {tender && <span style={{ marginLeft: 8, fontSize: 12, fontWeight: 600, color: '#2563eb' }}>({tender.reference_number || tender.tender_no || tender.title})</span>}
+            </div>
+            <div style={{ fontSize: 12, color: '#64748b' }}>
+              Click any row to expand rule-level results · Click "View Evidence" for full compliance trace
+            </div>
+          </div>
         </div>
 
-        <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ borderBottom: '1px solid #f1f5f9', background: '#f8fafc' }}>
-                {['Code', 'Bidder', 'GSTIN', 'Turnover', 'MII %', 'Score', 'Status', 'Risk', 'Actions'].map(h => (
-                  <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#64748b', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
+        {bids.length === 0 ? (
+          <div style={{ padding: '56px 24px', textAlign: 'center', background: '#fafafa' }}>
+            <div style={{ fontSize: 44, marginBottom: 12 }}>📭</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>
+              No Bids Submitted Against This Tender Yet
+            </div>
+            <p style={{ color: '#64748b', fontSize: 13, maxWidth: 520, margin: '0 auto 20px', lineHeight: 1.5 }}>
+              This procurement tender is currently published and open for bid submissions. Vendors can select this tender from the Bidder Portal to apply and submit their sealed verification documents.
+            </p>
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+              <button
+                onClick={() => navigate('/my-bids')}
+                style={{ padding: '9px 20px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg, #1e3a8a, #2563eb)', color: '#fff', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+              >
+                Go to Bidder Portal →
+              </button>
+              <button
+                onClick={() => navigate('/tenders')}
+                style={{ padding: '9px 20px', borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', color: '#475569', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+              >
+                Back to Tender Workspace
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #f1f5f9', background: '#f8fafc' }}>
+                  {['Code', 'Bidder', 'GSTIN', 'Turnover', 'MII %', 'Score', 'Status', 'Risk', 'Actions'].map(h => (
+                    <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#64748b', letterSpacing: '0.04em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
               {bids.map((b, i) => {
                 const isExpanded = expandedBid === b.id;
                 const status = b.overall_status || b.compliance_status;
@@ -373,6 +492,7 @@ export default function BidWorkspacePage() {
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
       {/* ─── Zero-LLM Notice ─────────────────────────────────────────────────── */}

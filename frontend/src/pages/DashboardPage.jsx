@@ -18,7 +18,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
-import { listBids, getMe, listTenders, resetDemo } from '../api/client';
+import { listBids, getMe, listTenders, resetDemo, getTenderBids } from '../api/client';
 import StatusBadge from '../components/StatusBadge';
 
 // ─── Fallback benchmark data ──────────────────────────────────────────────────
@@ -70,6 +70,8 @@ export default function DashboardPage() {
   const authState = useSelector(s => s.auth);
 
   const [bids, setBids] = useState(FALLBACK_BIDS);
+  const [tenders, setTenders] = useState([]);
+  const [selectedTenderId, setSelectedTenderId] = useState('');
   const [tender, setTender] = useState(null);
   const [loading, setLoading] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -83,20 +85,34 @@ export default function DashboardPage() {
 
   useEffect(() => { loadData(); }, []);
 
-  async function loadData() {
+  async function loadData(targetId) {
     setLoading(true);
     try {
+      const activeId = targetId !== undefined ? targetId : selectedTenderId;
       const [remoteBids, remoteTenders] = await Promise.allSettled([
-        listBids(),
+        activeId ? getTenderBids(activeId) : listBids(),
         listTenders(),
       ]);
-      if (remoteBids.status === 'fulfilled') {
-        const list = remoteBids.value?.bids || remoteBids.value || [];
-        if (Array.isArray(list) && list.length > 0) setBids(list);
-      }
+      let tenderList = [];
       if (remoteTenders.status === 'fulfilled') {
-        const list = remoteTenders.value?.tenders || remoteTenders.value || [];
-        if (Array.isArray(list) && list.length > 0) setTender(list[0]);
+        tenderList = remoteTenders.value?.tenders || (Array.isArray(remoteTenders.value) ? remoteTenders.value : []);
+        setTenders(tenderList);
+        if (activeId) {
+          const matched = tenderList.find(t => (t.id || t._id || t.tender_no) === activeId);
+          setTender(matched || { id: activeId, reference_number: activeId, title: `Tender ${activeId}` });
+        } else if (tenderList.length > 0) {
+          setTender(null);
+        }
+      }
+      if (remoteBids.status === 'fulfilled') {
+        const list = remoteBids.value?.bids || (Array.isArray(remoteBids.value) ? remoteBids.value : []);
+        if (Array.isArray(list)) {
+          if (activeId) {
+            setBids(list);
+          } else {
+            setBids(list.length > 0 ? list : (tenderList.length === 0 ? FALLBACK_BIDS : []));
+          }
+        }
       }
     } finally {
       setLoading(false);
@@ -194,7 +210,28 @@ export default function DashboardPage() {
             {' '}· {total} bids submitted
           </p>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {tenders.length > 0 && (
+            <select
+              value={selectedTenderId}
+              onChange={(e) => {
+                const nextId = e.target.value;
+                setSelectedTenderId(nextId);
+                loadData(nextId);
+              }}
+              style={{ padding: '7px 12px', borderRadius: 8, border: '1.5px solid #cbd5e1', fontSize: 12, fontWeight: 700, background: '#fff', color: '#0f172a' }}
+            >
+              <option value="">🌐 All Tenders ({tenders.length})</option>
+              {tenders.map(t => {
+                const tId = t.id || t._id || t.tender_no;
+                return (
+                  <option key={tId} value={tId}>
+                    {t.reference_number || t.tender_no || t.title}
+                  </option>
+                );
+              })}
+            </select>
+          )}
           <button onClick={() => navigate('/tenders')}
             style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', color: '#1d4ed8', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
             📋 Manage Tender

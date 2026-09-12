@@ -7,10 +7,13 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 _BACKEND = Path(__file__).resolve().parent.parent
+_ROOT_ENV = _BACKEND.parent / ".env"
 _BACKEND_ENV = _BACKEND / ".env"
 
+if _ROOT_ENV.exists():
+    load_dotenv(_ROOT_ENV, override=False)
 if _BACKEND_ENV.exists():
-    load_dotenv(_BACKEND_ENV)
+    load_dotenv(_BACKEND_ENV, override=True)
 
 
 def get_port() -> int:

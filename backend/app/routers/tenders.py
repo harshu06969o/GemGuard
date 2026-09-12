@@ -4,14 +4,18 @@ Strict Specifications:
 1. PDF Ingestion: POST /api/v1/tenders/upload utilizing PyMuPDF to parse text and table structures.
 2. Rule Extraction: Integrates TenderCompiler to extract financial turnover, MII %, and statutory registrations.
 3. Manual Override: PUT /api/v1/tenders/{id}/rules allowing Procurement Officer to modify/add rules.
+4. Flexible Lookup: Supports querying tenders by _id, id, tender_no, and reference_number.
+5. Bidder Synchronization: Tenders created and published are permanently saved in MongoDB and visible to bidders.
 """
 
 import logging
+import secrets
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-from app.core.database import doc_to_dict, get_db, to_oid, utcnow_str
+from app.core.database import doc_to_dict, get_db, safe_oid, to_oid, utcnow_str
 from app.core.storage import storage
 from app.schemas.domain import AuditEvent, RequirementRule, Tender
 from app.pipeline.tender_compiler import TenderCompiler
@@ -22,13 +26,20 @@ router = APIRouter(tags=["tenders"])
 
 
 class TenderCreateRequest(BaseModel):
-    tender_no: str
+    tender_no: Optional[str] = None
+    reference_number: Optional[str] = None
     title: str
     organization: Optional[str] = "CPCL"
     buyer: Optional[str] = "CPCL"
+    authority: Optional[str] = None
     description: Optional[str] = None
     closing_date: Optional[str] = None
+    submission_deadline: Optional[str] = None
     turnover_threshold_cr: Optional[float] = None
+    estimated_value_cr: Optional[float] = None
+    local_content_pct: Optional[float] = None
+    category: Optional[str] = "Goods"
+    status: Optional[str] = "ACTIVE"
 
 
 class CompileRulesRequest(BaseModel):
@@ -46,6 +57,7 @@ class RuleOverrideItem(BaseModel):
     conditions: Optional[Dict[str, Any]] = None
     evidence_type: Optional[str] = None
     verification_source: Optional[str] = None
+    clause_text: Optional[str] = None
 
 
 class ManualRulesOverrideRequest(BaseModel):
@@ -60,24 +72,71 @@ class ManualRulesOverrideRequest(BaseModel):
 @router.get("/api/tenders")
 @router.get("/tenders")
 async def list_tenders(db=Depends(get_db)):
-    """List all tenders ordered by creation time."""
+    """List all tenders ordered by creation time, populated with their requirement rules."""
     cursor = db["tenders"].find().sort("created_at", -1)
     docs = await cursor.to_list(100)
-    return [doc_to_dict(d) for d in docs]
+    results = []
+    for d in docs:
+        tender_dict = doc_to_dict(d)
+        t_id = tender_dict.get("id")
+        ref_no = tender_dict.get("reference_number") or tender_dict.get("tender_no")
+
+        # Fetch associated rules from rules collection
+        rule_query = []
+        if t_id:
+            rule_query.append({"tender_id": t_id})
+        if ref_no:
+            rule_query.append({"tender_id": ref_no})
+            rule_query.append({"tender_no": ref_no})
+
+        rules_list = []
+        if rule_query:
+            rules_cursor = db["rules"].find({"$or": rule_query})
+            rules_list = [doc_to_dict(r) for r in await rules_cursor.to_list(100)]
+
+        # If rules exist in collection use them; otherwise check embedded rules
+        tender_dict["requirement_rules"] = rules_list or tender_dict.get("requirement_rules") or []
+        tender_dict["rules"] = tender_dict["requirement_rules"]
+        results.append(tender_dict)
+
+    return results
 
 
 @router.get("/api/v1/tenders/{tender_id}")
 @router.get("/api/tenders/{tender_id}")
 @router.get("/tenders/{tender_id}")
 async def get_tender(tender_id: str, db=Depends(get_db)):
-    """Get single tender details by ID."""
-    t = await db["tenders"].find_one({"_id": to_oid(tender_id)})
+    """Get single tender details by ID, tender_no, or reference_number."""
+    oid = safe_oid(tender_id)
+    query = [{"_id": oid}] if oid else []
+    query.extend([
+        {"_id": tender_id},
+        {"id": tender_id},
+        {"tender_no": tender_id},
+        {"reference_number": tender_id},
+    ])
+    t = await db["tenders"].find_one({"$or": query})
     if not t:
         raise HTTPException(status_code=404, detail=f"Tender not found: {tender_id}")
+
     res = doc_to_dict(t)
-    # Include requirement rules
-    rules_cursor = db["rules"].find({"tender_id": tender_id})
-    res["rules"] = [doc_to_dict(r) for r in await rules_cursor.to_list(100)]
+    t_id = res.get("id")
+    ref_no = res.get("reference_number") or res.get("tender_no")
+
+    rule_query = []
+    if t_id:
+        rule_query.append({"tender_id": t_id})
+    if ref_no:
+        rule_query.append({"tender_id": ref_no})
+        rule_query.append({"tender_no": ref_no})
+
+    rules_list = []
+    if rule_query:
+        rules_cursor = db["rules"].find({"$or": rule_query})
+        rules_list = [doc_to_dict(r) for r in await rules_cursor.to_list(100)]
+
+    res["requirement_rules"] = rules_list or res.get("requirement_rules") or []
+    res["rules"] = res["requirement_rules"]
     return res
 
 
@@ -85,59 +144,188 @@ async def get_tender(tender_id: str, db=Depends(get_db)):
 @router.post("/api/tenders", status_code=status.HTTP_201_CREATED)
 @router.post("/tenders", status_code=status.HTTP_201_CREATED)
 async def create_tender(body: TenderCreateRequest, db=Depends(get_db)):
-    """Create a new tender."""
-    org = body.organization or body.buyer or "CPCL"
+    """Create a new tender and persist to MongoDB."""
+    ref_no = (body.reference_number or body.tender_no or "").strip()
+    if not ref_no:
+        ref_no = f"GEM/2026/B/{secrets.token_hex(4).upper()}"
+
+    org = body.authority or body.organization or body.buyer or "CPCL"
+    turnover_cr = body.turnover_threshold_cr if body.turnover_threshold_cr is not None else 10.0
+    mii_pct = body.local_content_pct if body.local_content_pct is not None else 50.0
+
     payload = {
-        "tender_no": body.tender_no.strip(),
+        "tender_no": ref_no,
+        "reference_number": ref_no,
         "title": body.title.strip(),
         "organization": org,
         "buyer": org,
-        "description": body.description,
+        "authority": org,
+        "description": body.description or f"Procurement of {body.title.strip()}",
         "closing_date": body.closing_date,
-        "turnover_threshold_cr": body.turnover_threshold_cr,
-        "status": "ACTIVE",
+        "submission_deadline": body.submission_deadline or body.closing_date,
+        "turnover_threshold_cr": turnover_cr,
+        "estimated_value_cr": body.estimated_value_cr or 0.0,
+        "local_content_pct": mii_pct,
+        "local_content_threshold_pct": mii_pct,
+        "category": body.category or "Goods",
+        "status": body.status or "ACTIVE",
         "created_at": utcnow_str(),
         "updated_at": utcnow_str(),
         "version": 1,
+        "documents": [],
     }
-    tender_domain = Tender(**payload)
-    doc_data = tender_domain.model_dump(by_alias=True, exclude_none=True)
-    doc_data.pop("id", None)
-    doc_data.pop("_id", None)
 
-    existing = await db["tenders"].find_one({"tender_no": body.tender_no.strip()})
+    # Check for existing tender by reference number
+    existing = await db["tenders"].find_one({"$or": [{"tender_no": ref_no}, {"reference_number": ref_no}]})
     if existing:
-        raise HTTPException(status_code=409, detail=f"Tender '{body.tender_no}' already exists.")
+        target_id = str(existing["_id"])
+        await db["tenders"].update_one({"_id": existing["_id"]}, {"$set": payload})
+        created = await db["tenders"].find_one({"_id": existing["_id"]})
+    else:
+        result = await db["tenders"].insert_one(payload)
+        target_id = str(result.inserted_id)
+        created = await db["tenders"].find_one({"_id": result.inserted_id})
 
-    result = await db["tenders"].insert_one(doc_data)
-    created = await db["tenders"].find_one({"_id": result.inserted_id})
+    # Create baseline requirement rules if not already present
+    existing_rules = await db["rules"].count_documents({"tender_id": target_id})
+    if existing_rules == 0:
+        baseline_rules = [
+            {
+                "tender_id": target_id,
+                "clause_id": "Clause 3.1",
+                "metric": "annual_turnover_cr",
+                "operator": ">=",
+                "threshold": turnover_cr,
+                "unit": "INR_CR",
+                "severity": "CRITICAL",
+                "clause_text": f"Minimum average annual turnover threshold of INR {turnover_cr} Crores during preceding 3 financial years.",
+                "evidence_type": "CA_CERTIFICATE",
+                "verification_source": "GSTN",
+                "created_at": utcnow_str(),
+                "source": "OFFICER_INPUT",
+            },
+            {
+                "tender_id": target_id,
+                "clause_id": "Clause 3.4",
+                "metric": "mii_local_content_percentage",
+                "operator": ">=",
+                "threshold": mii_pct,
+                "unit": "%",
+                "severity": "HIGH",
+                "clause_text": f"Bidder shall qualify as a local supplier with minimum {mii_pct}% local content as per PPP-MII order.",
+                "evidence_type": "MII_DECLARATION",
+                "verification_source": "DPIIT",
+                "created_at": utcnow_str(),
+                "source": "OFFICER_INPUT",
+            },
+            {
+                "tender_id": target_id,
+                "clause_id": "Clause 3.2",
+                "metric": "gst_registration_active",
+                "operator": "==",
+                "threshold": True,
+                "unit": "BOOLEAN",
+                "severity": "CRITICAL",
+                "clause_text": "Goods and Services Tax (GST) registration status must be ACTIVE as of bid submission date.",
+                "evidence_type": "GST_CERTIFICATE",
+                "verification_source": "GSTN",
+                "created_at": utcnow_str(),
+                "source": "BASELINE",
+            },
+            {
+                "tender_id": target_id,
+                "clause_id": "Clause 3.5",
+                "metric": "pan_card_valid",
+                "operator": "==",
+                "threshold": True,
+                "unit": "BOOLEAN",
+                "severity": "CRITICAL",
+                "clause_text": "Permanent Account Number (PAN) card must be valid and verified with Income Tax Department.",
+                "evidence_type": "PAN_CARD",
+                "verification_source": "INCOME_TAX_PAN",
+                "created_at": utcnow_str(),
+                "source": "BASELINE",
+            },
+            {
+                "tender_id": target_id,
+                "clause_id": "Clause 3.3",
+                "metric": "udyam_registration_active",
+                "operator": "==",
+                "threshold": True,
+                "unit": "BOOLEAN",
+                "severity": "MEDIUM",
+                "clause_text": "Valid Udyam Registration Certificate for MSME bidders claiming purchase preference.",
+                "evidence_type": "UDYAM_CERTIFICATE",
+                "verification_source": "UDYAM",
+                "created_at": utcnow_str(),
+                "source": "BASELINE",
+            },
+        ]
+        clean_rules = []
+        for r in baseline_rules:
+            res_r = await db["rules"].insert_one(r)
+            r_dict = dict(r)
+            r_dict["id"] = str(res_r.inserted_id)
+            r_dict.pop("_id", None)
+            clean_rules.append(r_dict)
+
+        await db["tenders"].update_one(
+            {"_id": created["_id"]},
+            {"$set": {"requirement_rules": clean_rules}},
+        )
+        created["requirement_rules"] = clean_rules
 
     # Audit log
     await db["audit"].insert_one({
         "timestamp": utcnow_str(),
         "actor": "officer@gem.gov.in",
         "action": "TENDER_CREATED",
-        "entity_id": str(result.inserted_id),
-        "details": {"tender_no": body.tender_no},
+        "entity_id": target_id,
+        "details": {"tender_no": ref_no, "title": body.title.strip()},
     })
 
-    return doc_to_dict(created)
+    created_dict = doc_to_dict(created)
+    created_dict["requirement_rules"] = [doc_to_dict(r) for r in created.get("requirement_rules", [])]
+    created_dict["rules"] = created_dict["requirement_rules"]
+    return created_dict
 
 
 @router.put("/api/v1/tenders/{tender_id}")
 @router.put("/api/tenders/{tender_id}")
 @router.put("/tenders/{tender_id}")
 async def update_tender(tender_id: str, body: Dict[str, Any], db=Depends(get_db)):
-    """Update tender metadata."""
-    oid = to_oid(tender_id)
+    """Update tender metadata by ID, tender_no, or reference_number."""
+    oid = safe_oid(tender_id)
+    query = [{"_id": oid}] if oid else []
+    query.extend([
+        {"_id": tender_id},
+        {"id": tender_id},
+        {"tender_no": tender_id},
+        {"reference_number": tender_id},
+    ])
     body.pop("_id", None)
     body.pop("id", None)
     body["updated_at"] = utcnow_str()
-    res = await db["tenders"].update_one({"_id": oid}, {"$set": body})
+
+    res = await db["tenders"].update_one({"$or": query}, {"$set": body})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail=f"Tender not found: {tender_id}")
-    updated = await db["tenders"].find_one({"_id": oid})
-    return doc_to_dict(updated)
+
+    updated = await db["tenders"].find_one({"$or": query})
+    res_dict = doc_to_dict(updated)
+
+    # Fetch updated rules
+    t_id = res_dict.get("id")
+    ref_no = res_dict.get("reference_number") or res_dict.get("tender_no")
+    rule_query = []
+    if t_id:
+        rule_query.append({"tender_id": t_id})
+    if ref_no:
+        rule_query.append({"tender_id": ref_no})
+    rules_docs = await db["rules"].find({"$or": rule_query}).to_list(100) if rule_query else []
+    res_dict["requirement_rules"] = [doc_to_dict(r) for r in rules_docs] or res_dict.get("requirement_rules", [])
+    res_dict["rules"] = res_dict["requirement_rules"]
+    return res_dict
 
 
 @router.get("/api/v1/tenders/{tender_id}/bids")
@@ -145,7 +333,34 @@ async def update_tender(tender_id: str, body: Dict[str, Any], db=Depends(get_db)
 @router.get("/tenders/{tender_id}/bids")
 async def get_tender_bids(tender_id: str, db=Depends(get_db)):
     """Get all submitted bids for a specific tender."""
-    cursor = db["bids"].find({"tender_id": tender_id})
+    oid = safe_oid(tender_id)
+    tender_query = [{"_id": oid}] if oid else []
+    tender_query.extend([
+        {"_id": tender_id},
+        {"id": tender_id},
+        {"tender_no": tender_id},
+        {"reference_number": tender_id},
+    ])
+    tender = await db["tenders"].find_one({"$or": tender_query})
+
+    match_keys = [tender_id]
+    if tender:
+        if "_id" in tender:
+            match_keys.append(str(tender["_id"]))
+        if "id" in tender and tender["id"]:
+            match_keys.append(str(tender["id"]))
+        if "tender_no" in tender and tender["tender_no"]:
+            match_keys.append(str(tender["tender_no"]))
+        if "reference_number" in tender and tender["reference_number"]:
+            match_keys.append(str(tender["reference_number"]))
+
+    unique_keys = list(set(match_keys))
+    cursor = db["bids"].find({
+        "$or": [
+            {"tender_id": {"$in": unique_keys}},
+            {"tender_reference": {"$in": unique_keys}},
+        ]
+    }).sort("created_at", -1)
     bids = await cursor.to_list(100)
     return [doc_to_dict(b) for b in bids]
 
@@ -161,10 +376,10 @@ async def upload_and_compile_tender(
     db=Depends(get_db),
 ):
     """
-    STRICT SPECIFICATION 1 & 2:
-    1. Ingest tender PDF via PyMuPDF (capturing text and table structures).
-    2. Extract executable RequirementRule records (Turnover, MII %, Statutory: GST/PAN/Udyam).
-    3. Persist Tender & Rules in MongoDB with audit trace.
+    Ingest tender PDF via PyMuPDF (capturing text and table structures).
+    Validates document authenticity:
+    - If valid tender: extracts RequirementRules and persists to MongoDB.
+    - If not a tender (e.g. resume or receipt): rejects rule generation and returns diagnostic warning.
     """
     # 1. Read file bytes and save to hybrid storage
     file_bytes = await file.read()
@@ -184,36 +399,38 @@ async def upload_and_compile_tender(
     target_tender_id = tender_id
     tender_doc = None
 
-    # 3. Create or update Tender record
+    # 3. Locate existing tender if tender_id was supplied
     if target_tender_id:
-        try:
-            oid = to_oid(target_tender_id)
-            await db["tenders"].update_one(
-                {"_id": oid},
-                {"$set": {
-                    "file_hash": stored.file_hash,
-                    "document_path": str(stored.file_path),
-                    "filename": stored.filename,
-                    "updated_at": utcnow_str(),
-                }},
-            )
-            tender_doc = await db["tenders"].find_one({"_id": oid})
-        except Exception:
-            target_tender_id = None
+        oid = safe_oid(target_tender_id)
+        query = [{"_id": oid}] if oid else []
+        query.extend([
+            {"_id": target_tender_id},
+            {"id": target_tender_id},
+            {"tender_no": target_tender_id},
+            {"reference_number": target_tender_id},
+        ])
+        tender_doc = await db["tenders"].find_one({"$or": query})
+        if tender_doc:
+            target_tender_id = str(tender_doc["_id"])
 
+    # If no existing tender was found, create or match by detected reference number
     if not tender_doc:
-        # Determine unique tender number
         detected_no = metadata.get("tender_no") or f"GEM/2026/B/{stored.file_hash[:7].upper()}"
-        existing = await db["tenders"].find_one({"tender_no": detected_no})
+        existing = await db["tenders"].find_one({
+            "$or": [{"tender_no": detected_no}, {"reference_number": detected_no}]
+        })
         if existing:
             target_tender_id = str(existing["_id"])
             tender_doc = existing
         else:
+            doc_title = metadata.get("title") or Path(file.filename).stem.replace("_", " ").title()
             new_tender = {
                 "tender_no": detected_no,
-                "title": metadata.get("title") or Path(file.filename).stem.replace("_", " ").title(),
+                "reference_number": detected_no,
+                "title": doc_title,
                 "organization": metadata.get("organization") or "CPCL",
                 "buyer": metadata.get("organization") or "CPCL",
+                "authority": metadata.get("organization") or "CPCL",
                 "closing_date": metadata.get("closing_date"),
                 "file_hash": stored.file_hash,
                 "document_path": str(stored.file_path),
@@ -222,26 +439,62 @@ async def upload_and_compile_tender(
                 "version": 1,
                 "created_at": utcnow_str(),
                 "updated_at": utcnow_str(),
+                "documents": [],
             }
             res = await db["tenders"].insert_one(new_tender)
             target_tender_id = str(res.inserted_id)
             tender_doc = await db["tenders"].find_one({"_id": res.inserted_id})
 
-    # 4. Save extracted RequirementRule records
-    # First clear any existing auto-compiled rules for this tender
-    await db["rules"].delete_many({"tender_id": target_tender_id, "is_manual": {"$ne": True}})
+    # Prepare document metadata record
+    new_doc_entry = {
+        "id": f"doc-{stored.file_hash[:10]}",
+        "original_filename": file.filename,
+        "filename": stored.filename,
+        "file_size": len(file_bytes),
+        "file_hash": stored.file_hash,
+        "uploaded_at": utcnow_str(),
+        "uploaded_by": "officer@gem.gov.in",
+        "document_path": str(stored.file_path),
+    }
+
+    # Update tender record with file metadata and append document entry
+    await db["tenders"].update_one(
+        {"_id": tender_doc["_id"]},
+        {
+            "$set": {
+                "file_hash": stored.file_hash,
+                "document_path": str(stored.file_path),
+                "filename": stored.filename,
+                "updated_at": utcnow_str(),
+            },
+            "$push": {"documents": new_doc_entry},
+        },
+    )
+
+    # 4. Check domain validity
+    is_valid_tender = diagnostics.get("is_tender", True)
 
     saved_rules = []
-    for r in extracted_rules:
-        r.tender_id = target_tender_id
-        r_dict = r.model_dump(by_alias=True, exclude_none=True)
-        r_dict.pop("id", None)
-        r_dict.pop("_id", None)
-        r_dict["created_at"] = utcnow_str()
-        r_dict["source"] = "AI_COMPILER"
-        insert_res = await db["rules"].insert_one(r_dict)
-        r_dict["id"] = str(insert_res.inserted_id)
-        saved_rules.append(r_dict)
+    if is_valid_tender and extracted_rules:
+        # Clear existing auto-compiled rules for this tender (preserving manual overrides)
+        await db["rules"].delete_many({"tender_id": target_tender_id, "is_manual": {"$ne": True}})
+
+        for r in extracted_rules:
+            r.tender_id = target_tender_id
+            r_dict = r.model_dump(by_alias=True, exclude_none=True)
+            r_dict.pop("id", None)
+            r_dict.pop("_id", None)
+            r_dict["created_at"] = utcnow_str()
+            r_dict["source"] = "AI_COMPILER"
+            insert_res = await db["rules"].insert_one(r_dict)
+            r_dict["id"] = str(insert_res.inserted_id)
+            saved_rules.append(r_dict)
+
+        # Embed compiled rules in the tender document
+        await db["tenders"].update_one(
+            {"_id": tender_doc["_id"]},
+            {"$set": {"requirement_rules": saved_rules}},
+        )
 
     # 5. Log audit event
     await db["audit"].insert_one({
@@ -252,15 +505,32 @@ async def upload_and_compile_tender(
         "details": {
             "filename": stored.filename,
             "file_hash": stored.file_hash,
+            "is_tender": is_valid_tender,
             "rules_count": len(saved_rules),
             "diagnostics": diagnostics,
         },
     })
 
+    refreshed_tender = await db["tenders"].find_one({"_id": tender_doc["_id"]})
+    tender_response = doc_to_dict(refreshed_tender)
+    tender_response["requirement_rules"] = saved_rules or tender_response.get("requirement_rules", [])
+    tender_response["rules"] = tender_response["requirement_rules"]
+
+    if not is_valid_tender:
+        return {
+            "status": "warning",
+            "is_tender": False,
+            "message": f"Uploaded PDF does not appear to be an official Tender or RFP document ({diagnostics.get('detection_reason', 'No procurement keywords detected')}). No rules were extracted.",
+            "tender": tender_response,
+            "rules": [],
+            "diagnostics": diagnostics,
+        }
+
     return {
         "status": "success",
+        "is_tender": True,
         "message": f"Successfully parsed tender PDF and compiled {len(saved_rules)} compliance rules.",
-        "tender": doc_to_dict(tender_doc),
+        "tender": tender_response,
         "rules": [doc_to_dict(r) for r in saved_rules],
         "diagnostics": diagnostics,
     }
@@ -290,16 +560,24 @@ async def manual_rule_override(
     db=Depends(get_db),
 ):
     """
-    STRICT SPECIFICATION 3:
     Manual Override: Allows Procurement Officer to manually modify or add rules.
     - Validates inputs using RequirementRule domain model.
-    - Updates/replaces rules for the tender.
+    - Updates/replaces rules for the tender in db['rules'] and embeds in db['tenders'].
     - Emits tamper-evident AuditEvent with SHA-256 hash.
     """
-    oid = to_oid(tender_id)
-    tender = await db["tenders"].find_one({"_id": oid})
+    oid = safe_oid(tender_id)
+    query = [{"_id": oid}] if oid else []
+    query.extend([
+        {"_id": tender_id},
+        {"id": tender_id},
+        {"tender_no": tender_id},
+        {"reference_number": tender_id},
+    ])
+    tender = await db["tenders"].find_one({"$or": query})
     if not tender:
         raise HTTPException(status_code=404, detail=f"Tender not found: {tender_id}")
+
+    resolved_id = str(tender["_id"])
 
     # Normalize request structure
     raw_rules: List[Dict[str, Any]] = []
@@ -324,12 +602,12 @@ async def manual_rule_override(
     validated_rules: List[Dict[str, Any]] = []
     for idx, r_data in enumerate(raw_rules):
         try:
-            r_data["tender_id"] = tender_id
+            r_data["tender_id"] = resolved_id
             rule_obj = RequirementRule(**r_data)
             clean_dict = rule_obj.model_dump(by_alias=True, exclude_none=True)
             clean_dict.pop("id", None)
             clean_dict.pop("_id", None)
-            clean_dict["tender_id"] = tender_id
+            clean_dict["tender_id"] = resolved_id
             clean_dict["is_manual"] = True
             clean_dict["updated_at"] = utcnow_str()
             clean_dict["override_actor"] = actor
@@ -341,13 +619,19 @@ async def manual_rule_override(
             )
 
     # Replace existing rules for this tender
-    await db["rules"].delete_many({"tender_id": tender_id})
+    await db["rules"].delete_many({"$or": [{"tender_id": resolved_id}, {"tender_id": tender_id}]})
 
     # Insert validated rules
     for r in validated_rules:
         await db["rules"].insert_one(r)
 
-    updated_rules = await db["rules"].find({"tender_id": tender_id}).to_list(100)
+    updated_rules = await db["rules"].find({"tender_id": resolved_id}).to_list(100)
+
+    # Embed updated rules in the tender document
+    await db["tenders"].update_one(
+        {"_id": tender["_id"]},
+        {"$set": {"requirement_rules": [doc_to_dict(r) for r in updated_rules]}},
+    )
 
     # Fetch previous hash for audit chain
     latest_audit = await db["audit"].find_one(sort=[("timestamp", -1)])
@@ -357,7 +641,7 @@ async def manual_rule_override(
     audit_event = AuditEvent(
         actor=actor,
         action="OFFICER_RULE_OVERRIDE",
-        entity_id=tender_id,
+        entity_id=resolved_id,
         prev_hash=prev_hash,
         details={
             "reason": reason,
@@ -373,7 +657,7 @@ async def manual_rule_override(
     logger.info(
         "Officer %s overridden rules for tender %s (%d rules updated). Audit hash: %s",
         actor,
-        tender_id,
+        resolved_id,
         len(updated_rules),
         audit_dict.get("event_hash", "")[:12],
     )
@@ -381,7 +665,7 @@ async def manual_rule_override(
     return {
         "status": "success",
         "message": f"Successfully updated {len(updated_rules)} rules for tender {tender_id}.",
-        "tender_id": tender_id,
+        "tender_id": resolved_id,
         "rules": [doc_to_dict(r) for r in updated_rules],
         "audit_event_hash": audit_dict.get("event_hash"),
     }
@@ -398,16 +682,24 @@ async def compile_tender_rules(
     db=Depends(get_db),
 ):
     """Compile rules for an existing tender using TenderCompiler."""
-    oid = to_oid(tender_id)
-    tender = await db["tenders"].find_one({"_id": oid})
+    oid = safe_oid(tender_id)
+    query = [{"_id": oid}] if oid else []
+    query.extend([
+        {"_id": tender_id},
+        {"id": tender_id},
+        {"tender_no": tender_id},
+        {"reference_number": tender_id},
+    ])
+    tender = await db["tenders"].find_one({"$or": query})
     if not tender:
         raise HTTPException(status_code=404, detail=f"Tender not found: {tender_id}")
 
-    existing_rules = await db["rules"].find({"tender_id": tender_id}).to_list(100)
+    resolved_id = str(tender["_id"])
+    existing_rules = await db["rules"].find({"tender_id": resolved_id}).to_list(100)
     if existing_rules:
         return {
             "status": "compiled",
-            "tender_id": tender_id,
+            "tender_id": resolved_id,
             "rules_count": len(existing_rules),
             "rules": [doc_to_dict(r) for r in existing_rules],
         }
@@ -415,7 +707,7 @@ async def compile_tender_rules(
     # If document path exists, compile from PDF
     doc_path = tender.get("document_path")
     if doc_path and Path(doc_path).exists():
-        _, rules, diag = TenderCompiler.compile_pdf(doc_path, tender_id=tender_id)
+        _, rules, diag = TenderCompiler.compile_pdf(doc_path, tender_id=resolved_id)
         for r in rules:
             r_dict = r.model_dump(by_alias=True, exclude_none=True)
             r_dict.pop("id", None)
@@ -426,7 +718,7 @@ async def compile_tender_rules(
         # Generate baseline standard rules
         default_rules = [
             RequirementRule(
-                tender_id=tender_id,
+                tender_id=resolved_id,
                 clause_id="Clause 3.1",
                 metric="annual_turnover_cr",
                 operator=">=",
@@ -437,18 +729,18 @@ async def compile_tender_rules(
                 verification_source="GSTN",
             ),
             RequirementRule(
-                tender_id=tender_id,
+                tender_id=resolved_id,
                 clause_id="Clause 3.4",
                 metric="mii_local_content_percentage",
                 operator=">=",
-                threshold=50.0,
+                threshold=tender.get("local_content_pct", 50.0) or 50.0,
                 unit="%",
                 severity="HIGH",
                 evidence_type="MII_DECLARATION",
                 verification_source="DPIIT",
             ),
             RequirementRule(
-                tender_id=tender_id,
+                tender_id=resolved_id,
                 clause_id="Clause 3.2",
                 metric="gst_registration_active",
                 operator="==",
@@ -459,7 +751,7 @@ async def compile_tender_rules(
                 verification_source="GSTN",
             ),
             RequirementRule(
-                tender_id=tender_id,
+                tender_id=resolved_id,
                 clause_id="Clause 3.5",
                 metric="pan_card_valid",
                 operator="==",
@@ -470,7 +762,7 @@ async def compile_tender_rules(
                 verification_source="INCOME_TAX_PAN",
             ),
             RequirementRule(
-                tender_id=tender_id,
+                tender_id=resolved_id,
                 clause_id="Clause 3.3",
                 metric="udyam_registration_active",
                 operator="==",
@@ -488,10 +780,10 @@ async def compile_tender_rules(
             r_dict["created_at"] = utcnow_str()
             await db["rules"].insert_one(r_dict)
 
-    saved_rules = await db["rules"].find({"tender_id": tender_id}).to_list(100)
+    saved_rules = await db["rules"].find({"tender_id": resolved_id}).to_list(100)
     return {
         "status": "compiled",
-        "tender_id": tender_id,
+        "tender_id": resolved_id,
         "rules_count": len(saved_rules),
         "rules": [doc_to_dict(r) for r in saved_rules],
     }

@@ -109,13 +109,23 @@ def utcnow_str() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def doc_to_dict(d: dict) -> dict:
+def doc_to_dict(d: Any) -> Any:
+    """Recursively convert MongoDB BSON document to clean JSON serializable dictionary."""
     if d is None:
         return {}
-    d["id"] = str(d.pop("_id", ""))
-    for k, v in list(d.items()):
-        if isinstance(v, ObjectId):
-            d[k] = str(v)
+    if isinstance(d, ObjectId):
+        return str(d)
+    if isinstance(d, datetime):
+        return d.isoformat()
+    if isinstance(d, list):
+        return [doc_to_dict(item) for item in d]
+    if isinstance(d, dict):
+        res = dict(d)
+        if "_id" in res:
+            res["id"] = str(res.pop("_id"))
+        for k, v in list(res.items()):
+            res[k] = doc_to_dict(v)
+        return res
     return d
 
 
@@ -892,10 +902,13 @@ app.add_middleware(
 
 @app.middleware("http")
 async def api_v1_rewrite_middleware(request: Request, call_next):
-    if request.url.path.startswith("/api/v1/"):
-        request.scope["path"] = request.url.path.replace("/api/v1/", "/api/", 1)
-    elif request.url.path == "/api/v1":
-        request.scope["path"] = "/api"
+    # Normalize double or multiple /v1 prefixes (e.g. /api/v1/v1/bids -> /api/bids)
+    path = request.url.path
+    while path.startswith("/api/v1/"):
+        path = path.replace("/api/v1/", "/api/", 1)
+    if path == "/api/v1":
+        path = "/api"
+    request.scope["path"] = path
     return await call_next(request)
 
 
@@ -1506,7 +1519,10 @@ async def list_bid_documents(bid_id: str, db=Depends(get_db)):
 
 @app.post("/api/bids/{bid_id}/documents/upload")
 async def upload_bid_document(bid_id: str, file: UploadFile = File(...), db=Depends(get_db)):
-    bid = await db["bids"].find_one({"_id": to_oid(bid_id)})
+    oid = safe_oid(bid_id)
+    conds = [{"_id": oid}] if oid else []
+    conds.extend([{"_id": bid_id}, {"id": bid_id}, {"bid_id": bid_id}])
+    bid = await db["bids"].find_one({"$or": conds})
     if not bid:
         raise HTTPException(status_code=404, detail="Bid not found")
 

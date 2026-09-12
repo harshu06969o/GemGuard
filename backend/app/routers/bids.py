@@ -6,16 +6,42 @@ Modular routing for Bids, Document Processing, Evidence, Evaluation, and Officer
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 
-from app.core.database import doc_to_dict, get_db, to_oid, utcnow_str
+from app.core.database import doc_to_dict, get_db, safe_oid, to_oid, utcnow_str
 from app.core.storage import storage
 from app.schemas.domain import Evidence, RuleResult, RuleStatus
 
 logger = logging.getLogger("gemguard.routers.bids")
 
 router = APIRouter(tags=["bids"])
+
+
+async def _resolve_tender_keys(db, tender_id: str) -> List[str]:
+    """Given any tender identifier, return all matching aliases (_id string, id, tender_no, reference_number)."""
+    if not tender_id:
+        return []
+    oid = safe_oid(tender_id)
+    conds = [{"_id": oid}] if oid else []
+    conds.extend([
+        {"_id": tender_id},
+        {"id": tender_id},
+        {"tender_no": tender_id},
+        {"reference_number": tender_id},
+    ])
+    tender = await db["tenders"].find_one({"$or": conds})
+    keys = [tender_id]
+    if tender:
+        if "_id" in tender:
+            keys.append(str(tender["_id"]))
+        if "id" in tender and tender["id"]:
+            keys.append(str(tender["id"]))
+        if "tender_no" in tender and tender["tender_no"]:
+            keys.append(str(tender["tender_no"]))
+        if "reference_number" in tender and tender["reference_number"]:
+            keys.append(str(tender["reference_number"]))
+    return list(set(keys))
 
 
 class SubmitBidRequest(BaseModel):
@@ -42,31 +68,53 @@ class OfficerOverrideRequest(BaseModel):
     notes: Optional[str] = None
 
 
+@router.get("/api/v1/bids")
 @router.get("/api/bids")
 @router.get("/bids")
-async def list_bids(db=Depends(get_db)):
-    """List all bids across all tenders."""
-    cursor = db["bids"].find().sort("created_at", -1)
+async def list_bids(tender_id: Optional[str] = Query(None), db=Depends(get_db)):
+    """List bids. If tender_id is provided, filter strictly to that tender."""
+    if tender_id:
+        keys = await _resolve_tender_keys(db, tender_id)
+        cursor = db["bids"].find({
+            "$or": [
+                {"tender_id": {"$in": keys}},
+                {"tender_reference": {"$in": keys}},
+            ]
+        }).sort("created_at", -1)
+    else:
+        cursor = db["bids"].find().sort("created_at", -1)
     bids = await cursor.to_list(100)
     return [doc_to_dict(b) for b in bids]
 
 
+@router.get("/api/v1/bids/mine")
 @router.get("/api/bids/mine")
 @router.get("/bids/mine")
-async def list_my_bids(db=Depends(get_db)):
-    """List bids submitted by current bidder."""
-    # Return all or filter by session
-    cursor = db["bids"].find().sort("created_at", -1)
+async def list_my_bids(tender_id: Optional[str] = Query(None), db=Depends(get_db)):
+    """List bids submitted by current bidder. If tender_id is provided, filter strictly."""
+    if tender_id:
+        keys = await _resolve_tender_keys(db, tender_id)
+        cursor = db["bids"].find({
+            "$or": [
+                {"tender_id": {"$in": keys}},
+                {"tender_reference": {"$in": keys}},
+            ]
+        }).sort("created_at", -1)
+    else:
+        cursor = db["bids"].find().sort("created_at", -1)
     bids = await cursor.to_list(100)
     return [doc_to_dict(b) for b in bids]
 
 
+@router.get("/api/v1/bids/{bid_id}")
 @router.get("/api/bids/{bid_id}")
 @router.get("/bids/{bid_id}")
 async def get_bid(bid_id: str, db=Depends(get_db)):
     """Get full bid details, including documents and compliance status."""
-    oid = to_oid(bid_id)
-    bid = await db["bids"].find_one({"_id": oid})
+    oid = safe_oid(bid_id)
+    conds = [{"_id": oid}] if oid else []
+    conds.extend([{"_id": bid_id}, {"id": bid_id}])
+    bid = await db["bids"].find_one({"$or": conds})
     if not bid:
         raise HTTPException(status_code=404, detail=f"Bid not found: {bid_id}")
     res = doc_to_dict(bid)
@@ -74,33 +122,54 @@ async def get_bid(bid_id: str, db=Depends(get_db)):
     # Attach tender details
     if bid.get("tender_id"):
         try:
-            tender = await db["tenders"].find_one({"_id": to_oid(bid["tender_id"])})
+            t_oid = safe_oid(bid["tender_id"])
+            t_conds = [{"_id": t_oid}] if t_oid else []
+            t_conds.extend([
+                {"_id": bid["tender_id"]},
+                {"id": bid["tender_id"]},
+                {"tender_no": bid.get("tender_reference") or bid["tender_id"]},
+                {"reference_number": bid.get("tender_reference") or bid["tender_id"]},
+            ])
+            tender = await db["tenders"].find_one({"$or": t_conds})
             if tender:
                 res["tender"] = doc_to_dict(tender)
         except Exception:
             pass
 
     # Attach documents
-    docs_cursor = db["bid_documents"].find({"bid_id": bid_id})
+    docs_cursor = db["bid_documents"].find({"bid_id": str(bid.get("_id") or bid.get("id") or bid_id)})
     res["documents"] = [doc_to_dict(d) for d in await docs_cursor.to_list(100)]
 
     # Attach evidence
-    ev_cursor = db["evidence"].find({"bid_id": bid_id})
+    ev_cursor = db["evidence"].find({"bid_id": str(bid.get("_id") or bid.get("id") or bid_id)})
     res["evidence"] = [doc_to_dict(e) for e in await ev_cursor.to_list(100)]
 
     return res
 
 
+@router.post("/api/v1/bids", status_code=status.HTTP_201_CREATED)
 @router.post("/api/bids", status_code=status.HTTP_201_CREATED)
 @router.post("/bids", status_code=status.HTTP_201_CREATED)
 async def submit_bid(body: SubmitBidRequest, db=Depends(get_db)):
     """Submit a bid for a tender."""
-    tender = await db["tenders"].find_one({"_id": to_oid(body.tender_id)})
+    oid = safe_oid(body.tender_id)
+    tender_query = [{"_id": oid}] if oid else []
+    tender_query.extend([
+        {"_id": body.tender_id},
+        {"id": body.tender_id},
+        {"tender_no": body.tender_id},
+        {"reference_number": body.tender_id},
+    ])
+    tender = await db["tenders"].find_one({"$or": tender_query})
     if not tender:
         raise HTTPException(status_code=404, detail=f"Tender not found: {body.tender_id}")
 
+    tender_id_str = str(tender.get("_id") or tender.get("id") or body.tender_id)
+    tender_ref = tender.get("tender_no") or tender.get("reference_number") or tender_id_str
+
     payload = {
-        "tender_id": body.tender_id,
+        "tender_id": tender_id_str,
+        "tender_reference": tender_ref,
         "bidder_id": body.bidder_id or "demo_bidder_001",
         "bidder_name": "Adani Total Gas Ltd" if not body.bidder_id else "Bidder Enterprise",
         "bid_amount": body.bid_amount or 14500000.0,
@@ -119,18 +188,33 @@ async def submit_bid(body: SubmitBidRequest, db=Depends(get_db)):
         "actor": payload["bidder_id"],
         "action": "BID_SUBMITTED",
         "entity_id": str(result.inserted_id),
-        "details": {"tender_id": body.tender_id},
+        "details": {"tender_id": tender_id_str, "tender_reference": tender_ref},
     })
 
     return doc_to_dict(created)
 
 
+@router.get("/api/v1/bids/{bid_id}/documents")
 @router.get("/api/bids/{bid_id}/documents")
 @router.get("/bids/{bid_id}/documents")
 async def list_bid_documents(bid_id: str, db=Depends(get_db)):
-    """List all documents uploaded for this bid."""
-    cursor = db["bid_documents"].find({"bid_id": bid_id})
+    """List all documents uploaded for this bid across both bid_documents and legacy documents collections."""
+    oid = safe_oid(bid_id)
+    bid_keys = [bid_id]
+    if oid:
+        bid_keys.append(oid)
+        bid_keys.append(str(oid))
+
+    # Query bid_documents
+    cursor = db["bid_documents"].find({"bid_id": {"$in": bid_keys}}).sort("uploaded_at", -1)
     docs = await cursor.to_list(100)
+
+    # Fallback/merge with legacy documents collection if needed
+    if not docs:
+        legacy_cursor = db["documents"].find({"bid_id": {"$in": bid_keys}}).sort("uploaded_at", -1)
+        legacy_docs = await legacy_cursor.to_list(100)
+        docs.extend(legacy_docs)
+
     return [doc_to_dict(d) for d in docs]
 
 
@@ -145,19 +229,24 @@ async def upload_bid_document(
     db=Depends(get_db),
 ):
     """Upload bid verification document (CA Cert, GSTN, PAN, MSME) and run Vision Document Processor."""
-    bid = await db["bids"].find_one({"_id": to_oid(bid_id)})
+    oid = safe_oid(bid_id)
+    conds = [{"_id": oid}] if oid else []
+    conds.extend([{"_id": bid_id}, {"id": bid_id}, {"bid_id": bid_id}])
+    bid = await db["bids"].find_one({"$or": conds})
     if not bid:
         raise HTTPException(status_code=404, detail=f"Bid not found: {bid_id}")
 
+    resolved_bid_id = str(bid.get("_id") or bid.get("id") or bid_id)
+
     stored = await storage.save_file(
         file_input=file,
-        filename=f"bid_{bid_id}_{file.filename}",
+        filename=f"bid_{resolved_bid_id}_{file.filename}",
         subfolder="bids",
         content_type=file.content_type,
     )
 
     doc_record = {
-        "bid_id": bid_id,
+        "bid_id": resolved_bid_id,
         "filename": stored.filename,
         "original_filename": file.filename,
         "file_path": str(stored.file_path),
@@ -168,13 +257,21 @@ async def upload_bid_document(
     res = await db["bid_documents"].insert_one(doc_record)
     doc_id = str(res.inserted_id)
 
+    # Also mirror into legacy documents collection for backward compatibility
+    try:
+        legacy_doc = dict(doc_record)
+        legacy_doc["_id"] = res.inserted_id
+        await db["documents"].insert_one(legacy_doc)
+    except Exception:
+        pass
+
     # Execute Vision Intelligence Document Processor (Dual-Engine + Classifier + Evidence Extractor)
     proc_res = await BidDocumentProcessor.process_single_file(
         file_path_or_bytes=stored.file_path,
         filename=file.filename,
         document_id=doc_id,
-        package_id=bid_id,
-        bidder_id=bid.get("bidder_id") or bid_id,
+        package_id=resolved_bid_id,
+        bidder_id=bid.get("bidder_id") or resolved_bid_id,
         db=db,
     )
 
@@ -193,6 +290,21 @@ async def upload_bid_document(
     }
 
 
+@router.delete("/api/v1/bids/{bid_id}/documents/{doc_id}")
+@router.delete("/api/bids/{bid_id}/documents/{doc_id}")
+@router.delete("/bids/{bid_id}/documents/{doc_id}")
+async def delete_bid_document(bid_id: str, doc_id: str, db=Depends(get_db)):
+    """Delete an uploaded bid document and its associated extracted evidence."""
+    doc_oid = safe_oid(doc_id)
+    doc_conds = [{"_id": doc_oid}] if doc_oid else []
+    doc_conds.extend([{"_id": doc_id}, {"id": doc_id}])
+
+    await db["bid_documents"].delete_many({"$or": doc_conds})
+    await db["documents"].delete_many({"$or": doc_conds})
+    await db["evidence"].delete_many({"document_id": doc_id})
+    return {"status": "deleted", "document_id": doc_id}
+
+
 @router.post("/api/bids/{bid_id}/package/upload")
 @router.post("/bids/{bid_id}/package/upload")
 @router.post("/api/v1/bids/{bid_id}/package/upload")
@@ -202,9 +314,14 @@ async def upload_bid_package(
     db=Depends(get_db),
 ):
     """Upload multiple bid documents simultaneously and process the complete package."""
-    bid = await db["bids"].find_one({"_id": to_oid(bid_id)})
+    oid = safe_oid(bid_id)
+    conds = [{"_id": oid}] if oid else []
+    conds.extend([{"_id": bid_id}, {"id": bid_id}, {"bid_id": bid_id}])
+    bid = await db["bids"].find_one({"$or": conds})
     if not bid:
         raise HTTPException(status_code=404, detail=f"Bid not found: {bid_id}")
+
+    resolved_bid_id = str(bid.get("_id") or bid.get("id") or bid_id)
 
     files_data: List[Tuple[str, bytes]] = []
     for f in files:
@@ -213,14 +330,14 @@ async def upload_bid_package(
         # Also store to disk for persistence
         await storage.save_file(
             file_input=content,
-            filename=f"bid_{bid_id}_{f.filename}",
+            filename=f"bid_{resolved_bid_id}_{f.filename}",
             subfolder="bids",
             content_type=f.content_type,
         )
         files_data.append((f.filename, content))
 
     package_result = await BidDocumentProcessor.process_bid_package(
-        bid_id=bid_id,
+        bid_id=resolved_bid_id,
         files_data=files_data,
         db=db,
     )
@@ -275,7 +392,17 @@ async def process_bid_documents(bid_id: str, db=Depends(get_db)):
 @router.get("/api/v1/bids/{bid_id}/evidence")
 async def list_bid_evidence(bid_id: str, db=Depends(get_db)):
     """List all extracted evidence entries with bounding boxes for this bid."""
-    cursor = db["evidence"].find({"$or": [{"bid_id": bid_id}, {"package_id": bid_id}]})
+    oid = safe_oid(bid_id)
+    keys = [bid_id]
+    if oid:
+        keys.append(str(oid))
+    cursor = db["evidence"].find({
+        "$or": [
+            {"bid_id": {"$in": keys}},
+            {"package_id": {"$in": keys}},
+            {"bidder_id": {"$in": keys}},
+        ]
+    })
     evidence_list = await cursor.to_list(200)
     return [doc_to_dict(e) for e in evidence_list]
 

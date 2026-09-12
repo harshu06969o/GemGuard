@@ -47,13 +47,24 @@ class HybridStorage:
         self.provider = os.getenv("STORAGE_PROVIDER", "local")
 
     @staticmethod
-    def compute_hash(data: bytes) -> str:
-        """Compute SHA-256 digest of byte content."""
-        return hashlib.sha256(data).hexdigest()
+    def compute_hash(data: Any) -> str:
+        """Compute SHA-256 digest of byte or string content safely."""
+        if data is None:
+            raw_bytes = b""
+        elif isinstance(data, (bytes, bytearray)):
+            raw_bytes = bytes(data)
+        elif isinstance(data, str):
+            raw_bytes = data.encode("utf-8")
+        else:
+            try:
+                raw_bytes = bytes(data)
+            except Exception:
+                raw_bytes = str(data).encode("utf-8")
+        return hashlib.sha256(raw_bytes).hexdigest()
 
     async def save_file(
         self,
-        file_input: Union[UploadFile, bytes, BinaryIO],
+        file_input: Union[UploadFile, bytes, BinaryIO, Any],
         filename: str,
         subfolder: Optional[str] = None,
         content_type: Optional[str] = None,
@@ -73,21 +84,42 @@ class HybridStorage:
         # Sanitize filename
         safe_filename = Path(filename).name
 
-        # Extract bytes
-        if isinstance(file_input, UploadFile):
-            content = await file_input.read()
-            # Reset seek position for any downstream consumers
-            await file_input.seek(0)
-            if not content_type and file_input.content_type:
-                content_type = file_input.content_type
-        elif isinstance(file_input, bytes):
-            content = file_input
-        elif hasattr(file_input, "read"):
-            content = file_input.read()
+        # Extract bytes handling async UploadFile, sync file-like, bytes, and strings
+        content: bytes = b""
+        if hasattr(file_input, "read"):
+            read_fn = file_input.read
+            import inspect
+            if inspect.iscoroutinefunction(read_fn):
+                content = await read_fn()
+            else:
+                raw = read_fn()
+                if inspect.iscoroutine(raw):
+                    content = await raw
+                else:
+                    content = raw
+
             if hasattr(file_input, "seek"):
-                file_input.seek(0)
+                seek_fn = file_input.seek
+                if inspect.iscoroutinefunction(seek_fn):
+                    await seek_fn(0)
+                else:
+                    s_res = seek_fn(0)
+                    if inspect.iscoroutine(s_res):
+                        await s_res
+
+            if not content_type and hasattr(file_input, "content_type"):
+                content_type = getattr(file_input, "content_type", None)
+        elif isinstance(file_input, (bytes, bytearray)):
+            content = bytes(file_input)
+        elif isinstance(file_input, str):
+            content = file_input.encode("utf-8")
         else:
             raise ValueError(f"Unsupported file_input type: {type(file_input)}")
+
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        elif not isinstance(content, (bytes, bytearray)):
+            content = bytes(content)
 
         file_hash = self.compute_hash(content)
         file_path = target_dir / safe_filename

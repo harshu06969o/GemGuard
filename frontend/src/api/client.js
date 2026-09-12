@@ -8,6 +8,18 @@ const envUrl = import.meta.env.VITE_API_URL;
 // Vite proxy maps /api → localhost:3000, so /api/v1/* works end-to-end
 const BASE = envUrl ? envUrl.replace(/\/$/, '') : '/api';
 
+/**
+ * Normalizes request paths against BASE to prevent duplicate /v1 segments
+ * (e.g. BASE=".../api/v1" + path="/v1/bids" -> ".../api/v1/bids")
+ */
+function resolveUrl(path) {
+  let p = path.startsWith('/') ? path : `/${path}`;
+  if (BASE.endsWith('/v1') && p.startsWith('/v1/')) {
+    p = p.slice(3);
+  }
+  return `${BASE}${p}`;
+}
+
 // Auth token management
 const TOKEN_KEY = 'gemguard_token';
 
@@ -29,7 +41,7 @@ function authHeaders() {
 }
 
 async function request(path, init) {
-  const url = `${BASE}${path}`;
+  const url = resolveUrl(path);
   const res = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
@@ -51,7 +63,7 @@ async function request(path, init) {
 }
 
 async function uploadWithProgress(path, formData, onProgress) {
-  const url = `${BASE}${path}`;
+  const url = resolveUrl(path);
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
@@ -65,10 +77,18 @@ async function uploadWithProgress(path, formData, onProgress) {
     });
     xhr.addEventListener('load', () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        resolve(JSON.parse(xhr.responseText));
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          resolve({ status: 'ok', raw: xhr.responseText });
+        }
       } else {
-        const body = JSON.parse(xhr.responseText || '{}');
-        reject(new ApiError(xhr.status, body.detail ?? body.error ?? xhr.statusText));
+        try {
+          const body = JSON.parse(xhr.responseText || '{}');
+          reject(new ApiError(xhr.status, body.detail ?? body.error ?? body.message ?? xhr.statusText));
+        } catch {
+          reject(new ApiError(xhr.status, xhr.statusText || 'Upload failed'));
+        }
       }
     });
     xhr.addEventListener('error', () => reject(new ApiError(0, 'Network error during upload')));
@@ -126,8 +146,10 @@ export const getMyProfile = () => request('/v1/bidders/me/profile');
 
 // ── Bids ─────────────────────────────────────────────────────────────────────
 
-export const listBids = () => request('/v1/bids');
-export const getMyBids = () => request('/v1/bids/mine');
+export const listBids = (tenderId) =>
+  request(tenderId ? `/v1/bids?tender_id=${encodeURIComponent(tenderId)}` : '/v1/bids');
+export const getMyBids = (tenderId) =>
+  request(tenderId ? `/v1/bids/mine?tender_id=${encodeURIComponent(tenderId)}` : '/v1/bids/mine');
 export const getBid = (id) => request(`/v1/bids/${id}`);
 export const submitBid = (tenderId) =>
   request('/v1/bids', { method: 'POST', body: JSON.stringify({ tender_id: tenderId }) });
@@ -144,6 +166,8 @@ export const uploadBidderDocument = (bidId, file, onProgress) => {
   fd.append('file', file);
   return uploadWithProgress(`/v1/bids/${bidId}/documents/upload`, fd, onProgress);
 };
+export const deleteBidDocument = (bidId, docId) =>
+  request(`/v1/bids/${bidId}/documents/${docId}`, { method: 'DELETE' });
 
 // ── Compliance Engine ────────────────────────────────────────────────────────
 

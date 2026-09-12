@@ -157,25 +157,50 @@ def sha256(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
 
-def doc_to_dict(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Convert MongoDB BSON document to clean JSON serializable dictionary."""
+def doc_to_dict(d: Any) -> Any:
+    """Recursively convert MongoDB BSON document to clean JSON serializable dictionary."""
     if d is None:
         return {}
-    res = dict(d)
-    if "_id" in res:
-        res["id"] = str(res.pop("_id"))
-    for k, v in list(res.items()):
-        if isinstance(v, ObjectId):
-            res[k] = str(v)
-        elif isinstance(v, datetime):
-            res[k] = v.isoformat()
-    return res
+    if isinstance(d, ObjectId):
+        return str(d)
+    if isinstance(d, datetime):
+        return d.isoformat()
+    if isinstance(d, list):
+        return [doc_to_dict(item) for item in d]
+    if isinstance(d, dict):
+        res = dict(d)
+        if "_id" in res:
+            res["id"] = str(res.pop("_id"))
+        for k, v in list(res.items()):
+            res[k] = doc_to_dict(v)
+        return res
+    return d
+
+
+def safe_oid(val: Any) -> Optional[ObjectId]:
+    """Convert value to ObjectId if valid 24-hex characters, otherwise return None without raising 422."""
+    if not val:
+        return None
+    if isinstance(val, ObjectId):
+        return val
+    if isinstance(val, str):
+        val_str = val.strip()
+        if len(val_str) == 24 and ObjectId.is_valid(val_str):
+            try:
+                return ObjectId(val_str)
+            except Exception:
+                return None
+    return None
 
 
 def to_oid(id_str: str) -> ObjectId:
     """Convert string to ObjectId, raising 422 if invalid."""
+    oid = safe_oid(id_str)
+    if oid is not None:
+        return oid
     try:
         return ObjectId(id_str)
     except Exception:
         raise HTTPException(status_code=422, detail=f"Invalid ID format: {id_str}")
+
 

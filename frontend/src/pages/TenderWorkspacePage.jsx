@@ -162,10 +162,11 @@ function TenderCard({ tender, onUploadRFP, onViewBids, navigate }) {
   async function handleExpand() {
     const next = !expanded;
     setExpanded(next);
-    if (next && tenderBids === null) {
+    const tId = localTender.id || localTender._id || localTender.tender_no;
+    if (next && tenderBids === null && tId) {
       setBidsLoading(true);
       try {
-        const result = await getTenderBids(localTender.id).catch(() => null);
+        const result = await getTenderBids(tId).catch(() => null);
         const list = result?.bids || result || [];
         setTenderBids(Array.isArray(list) ? list : []);
       } catch {
@@ -208,7 +209,10 @@ function TenderCard({ tender, onUploadRFP, onViewBids, navigate }) {
             📝 Corrigendum
           </button>
           <button
-            onClick={() => navigate('/bids')}
+            onClick={() => {
+              const tId = localTender.id || localTender._id || localTender.tender_no;
+              navigate(`/bids?tenderId=${encodeURIComponent(tId || '')}`);
+            }}
             style={{ padding: '6px 12px', borderRadius: 7, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}
           >
             View Bids →
@@ -317,7 +321,10 @@ function TenderCard({ tender, onUploadRFP, onViewBids, navigate }) {
                 )}
               </div>
               <button
-                onClick={() => navigate('/bids')}
+                onClick={() => {
+                  const tId = localTender.id || localTender._id || localTender.tender_no;
+                  navigate(`/bids?tenderId=${encodeURIComponent(tId || '')}`);
+                }}
                 style={{ padding: '5px 12px', borderRadius: 6, border: 'none', background: 'linear-gradient(135deg,#1e3a8a,#2563eb)', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
               >
                 Open Evaluation Matrix →
