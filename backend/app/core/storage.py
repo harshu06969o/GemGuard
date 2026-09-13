@@ -10,7 +10,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Optional, Union
+from typing import Any, BinaryIO, Optional, Union
 from fastapi import UploadFile
 
 from app.paths import DATA_DIR, UPLOADS_DIR
