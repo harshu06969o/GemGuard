@@ -9,12 +9,13 @@
  *  - Step 4: Pre-submission compliance verification dry-run against the selected tender's actual compiled rules.
  */
 
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useState, useMemo, useRef, Component } from 'react';
 import { useSelector } from 'react-redux';
 import {
   getMyProfile, getMyBids, listTenders,
   submitBid, uploadBidderDocument, listBidDocuments,
   listBidEvidence, deleteBidDocument, evaluateBid,
+  listBidderVaultDocuments, uploadBidderVaultDocument,
 } from '../api/client';
 import {
   UploadCloud, FileText, CheckCircle2, AlertTriangle, XCircle,
@@ -23,12 +24,54 @@ import {
   ExternalLink, Layers, Award
 } from 'lucide-react';
 
+// ── Error Boundary — prevents blank page on render errors ───────────────────
+class SectionErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  componentDidCatch(error, info) { console.error('[BidderWorkspace] Section render error:', error, info); }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: '20px', borderRadius: 10, background: '#fef2f2', border: '1px solid #fca5a5', color: '#991b1b', margin: '12px 0' }}>
+          <strong>⚠ A section failed to render.</strong>
+          <div style={{ fontSize: 12, marginTop: 6, fontFamily: 'monospace', color: '#7f1d1d' }}>
+            {this.state.error?.message || 'Unknown error'}
+          </div>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            style={{ marginTop: 10, padding: '5px 14px', borderRadius: 6, background: '#dc2626', color: '#fff', border: 'none', cursor: 'pointer', fontSize: 12 }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+
 const TABS = ['SUBMISSIONS', 'UPLOAD', 'DRY_RUN'];
 const TAB_LABELS = {
   SUBMISSIONS: '📋 My Submissions',
   UPLOAD: '📤 Upload & Manage Documents',
   DRY_RUN: '🔍 Tender Pre-Check & Dry-Run',
 };
+
+/** Safely convert any value (including objects from MongoDB/Gemini) to a renderable string */
+function safeStr(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (typeof val === 'object') {
+    // Try common scalar sub-keys before JSON-stringifying
+    for (const k of ['value', 'amount', 'number', 'text', 'name', 'val']) {
+      if (val[k] !== undefined) return safeStr(val[k]);
+    }
+    try { return JSON.stringify(val); } catch { return '[complex value]'; }
+  }
+  return String(val);
+}
 
 // ── Standard Statutory Checklist Definitions ────────────────────────────────
 const STANDARD_CHECKLIST = [
@@ -148,6 +191,9 @@ export default function BidderWorkspacePage() {
   const [bidDocuments, setBidDocuments] = useState([]);
   const [bidEvidence, setBidEvidence] = useState([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
+  const [vaultDocs, setVaultDocs] = useState([]);
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+  const [pendingTenderId, setPendingTenderId] = useState(null);
 
   // Workflow Action States
   const [uploading, setUploading] = useState(false);
@@ -194,10 +240,11 @@ export default function BidderWorkspacePage() {
     setLoading(true);
     setError(null);
     try {
-      const [profRes, bidsRes, tendersRes] = await Promise.allSettled([
+      const [profRes, bidsRes, tendersRes, vaultRes] = await Promise.allSettled([
         getMyProfile(),
         getMyBids(),
         listTenders(),
+        listBidderVaultDocuments(),
       ]);
 
       if (profRes.status === 'fulfilled' && profRes.value) {
@@ -227,6 +274,9 @@ export default function BidderWorkspacePage() {
         const firstB = bidList[0];
         setSelectedBidId(firstB.id || firstB._id);
       }
+      
+      const vDocs = vaultRes.status === 'fulfilled' ? (vaultRes.value || []) : [];
+      setVaultDocs(vDocs);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to initialize bidder workspace');
     } finally {
@@ -269,18 +319,30 @@ export default function BidderWorkspacePage() {
     }
 
     loadBidArtifacts();
+    loadBidArtifacts();
   }, [selectedBidId]);
 
+  function handleApplyClick(tenderId) {
+    if (vaultDocs.length === 0) {
+      setPendingTenderId(tenderId);
+      setShowVerificationModal(true);
+      return;
+    }
+    // Verified -> go ahead
+    handleApply(tenderId);
+  }
+
   // Apply to Open Tender
-  async function handleApply() {
-    if (!selectedTenderId) {
+  async function handleApply(tenderIdToApply) {
+    const tId = tenderIdToApply || selectedTenderId;
+    if (!tId) {
       setError('Please select an active tender first.');
       return;
     }
     setApplying(true);
     setError(null);
     try {
-      const res = await submitBid(selectedTenderId);
+      const res = await submitBid(tId);
       const newBidId = res?.id || res?._id;
       setSuccessMsg(`✓ Application created successfully! Created Bid Package #${newBidId ? newBidId.slice(-8) : 'New'}.`);
 
@@ -340,7 +402,33 @@ export default function BidderWorkspacePage() {
     } finally {
       setUploading(false);
       setUploadPct(0);
-      setUploadCategory(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  // Vault Verification Upload Handler
+  async function handleVaultUpload(file) {
+    setUploading(true);
+    setUploadPct(15);
+    setError(null);
+    try {
+      const res = await uploadBidderVaultDocument(file, null, pct => setUploadPct(pct));
+      const isGemini = res?.processed_by === 'GEMINI_3.5_FLASH_LITE';
+      const aiBadge = isGemini ? '✨ Gemini 3.5 Flash-Lite' : 'Vision Engine';
+      setSuccessMsg(`✓ ${file.name} parsed by ${aiBadge}! Extracted compliance figures.`);
+      
+      const vDocs = await listBidderVaultDocuments().catch(() => []);
+      setVaultDocs(vDocs);
+      setShowVerificationModal(false);
+      if (pendingTenderId) {
+        handleApply(pendingTenderId);
+        setPendingTenderId(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to upload verification document');
+    } finally {
+      setUploading(false);
+      setUploadPct(0);
     }
   }
 
@@ -379,10 +467,18 @@ export default function BidderWorkspacePage() {
   // Calculate Package Completeness
   const mandatoryItems = STANDARD_CHECKLIST.filter(c => c.mandatory);
   const satisfiedCount = mandatoryItems.filter(item => {
-    return bidDocuments.some(d => d.document_type === item.doc_type || d.doc_type === item.doc_type) ||
-           bidEvidence.some(e => e.field_name === item.metric || e.field === item.metric);
+    const docMatch = Array.isArray(bidDocuments) && bidDocuments.some(d =>
+      d.document_type === item.doc_type || d.doc_type === item.doc_type
+    );
+    const evMatch = Array.isArray(bidEvidence) && bidEvidence.some(e =>
+      e.field_name === item.evidenceKey || e.field_name === item.metric ||
+      e.field === item.evidenceKey || e.field === item.metric
+    );
+    return docMatch || evMatch;
   }).length;
-  const completenessPct = Math.round((satisfiedCount / mandatoryItems.length) * 100);
+  const completenessPct = mandatoryItems.length > 0
+    ? Math.round((satisfiedCount / mandatoryItems.length) * 100)
+    : 0;
 
   return (
     <div style={{ minHeight: 'calc(100vh - 54px)', background: '#f8fafc', fontFamily: "'Inter', sans-serif" }}>
@@ -508,85 +604,45 @@ export default function BidderWorkspacePage() {
           <div>
             {/* Tender Application Box */}
             <SectionCard
-              title="Apply to Open CPCL / GeM Tender"
-              subtitle="Browse active procurement opportunities and create a registered bid package"
+              title="Available GeM Procurement Tenders"
+              subtitle="Browse active procurement opportunities. First-time bidders must complete document verification to apply."
             >
               {openTenders.length === 0 ? (
                 <div style={{ color: '#94a3b8', fontSize: 13 }}>No open tenders found in the central catalog.</div>
               ) : (
-                <div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(300px, 1fr) auto', gap: 14, alignItems: 'flex-end', marginBottom: 16 }}>
-                    <div>
-                      <label style={{ fontSize: 12, fontWeight: 700, color: '#334155', display: 'block', marginBottom: 6 }}>
-                        Select Active Tender Opportunity
-                      </label>
-                      <select
-                        value={selectedTenderId}
-                        onChange={e => setSelectedTenderId(e.target.value)}
-                        style={{ width: '100%', padding: '10px 14px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff', fontWeight: 600, color: '#0f172a' }}
-                      >
-                        {openTenders.map(t => {
-                          const tId = t.id || t._id || t.tender_no;
-                          const tRef = t.reference_number || t.tender_no || 'Tender';
-                          return (
-                            <option key={tId} value={tId}>
-                              {tRef} — {t.title ? t.title.slice(0, 65) : 'General Procurement'}
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </div>
-
-                    <button
-                      onClick={handleApply}
-                      disabled={applying || !selectedTenderId}
-                      style={{
-                        padding: '11px 24px', borderRadius: 8, border: 'none',
-                        background: 'linear-gradient(135deg, #1e3a8a, #2563eb)',
-                        color: '#fff', fontSize: 13, fontWeight: 800, cursor: applying ? 'wait' : 'pointer',
-                        boxShadow: '0 2px 4px rgba(37,99,235,0.25)', display: 'flex', alignItems: 'center', gap: 8
-                      }}
-                    >
-                      {applying ? '⏳ Creating Package…' : '+ Apply & Create Bid Package'}
-                    </button>
-                  </div>
-
-                  {/* Active Selected Tender Details Card */}
-                  {currentTender && (
-                    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '16px 20px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Tender Reference</div>
-                        <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a', marginTop: 2, fontFamily: 'monospace' }}>
-                          {currentTender.reference_number || currentTender.tender_no || currentTender.id}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
+                  {openTenders.map(t => {
+                    const tId = t.id || t._id || t.tender_no;
+                    const tRef = t.reference_number || t.tender_no || 'Tender';
+                    const isAlreadyApplied = myBids.some(b => b.tender_id === tId || b.tender_reference === tRef);
+                    
+                    return (
+                      <div key={tId} style={{ border: '1px solid #e2e8f0', borderRadius: 10, background: '#fff', padding: 16, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                        <div>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: '#3b82f6', marginBottom: 6 }}>{tRef}</div>
+                          <div style={{ fontSize: 14, fontWeight: 800, color: '#0f172a', marginBottom: 12, lineHeight: 1.4 }}>
+                            {t.title ? (t.title.length > 80 ? t.title.slice(0, 80) + '...' : t.title) : 'General Procurement'}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#64748b', marginBottom: 16 }}>
+                            <Clock size={12} /> Deadline: {t.deadline ? new Date(t.deadline).toLocaleDateString() : 'TBD'}
+                          </div>
                         </div>
-                        <div style={{ fontSize: 11, color: '#475569', marginTop: 2 }}>{currentTender.organization || 'CPCL Procurement'}</div>
+                        
+                        <button
+                          onClick={() => handleApplyClick(tId)}
+                          disabled={applying || isAlreadyApplied}
+                          style={{
+                            width: '100%', padding: '10px 0', borderRadius: 8, border: 'none',
+                            background: isAlreadyApplied ? '#f1f5f9' : 'linear-gradient(135deg, #1e3a8a, #2563eb)',
+                            color: isAlreadyApplied ? '#94a3b8' : '#fff', fontSize: 12, fontWeight: 700, cursor: (applying || isAlreadyApplied) ? 'not-allowed' : 'pointer',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6
+                          }}
+                        >
+                          {applying && pendingTenderId === tId ? '⏳ Processing…' : isAlreadyApplied ? '✓ Applied' : 'Apply for Tender'}
+                        </button>
                       </div>
-
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Estimated Value</div>
-                        <div style={{ fontSize: 13, fontWeight: 800, color: '#166534', marginTop: 2 }}>
-                          {currentTender.estimated_value ? `₹ ${currentTender.estimated_value} Cr` : '₹ 12.50 Cr (Refinery Works)'}
-                        </div>
-                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Two-Envelope Competitive Bidding</div>
-                      </div>
-
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Submission Deadline</div>
-                        <div style={{ fontSize: 13, fontWeight: 800, color: '#dc2626', marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <Clock size={13} /> {currentTender.closing_date ? new Date(currentTender.closing_date).toLocaleDateString('en-IN') : 'Active Open Window'}
-                        </div>
-                        <div style={{ fontSize: 11, color: '#16a34a', marginTop: 2 }}>✓ Deadline Gate Open</div>
-                      </div>
-
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 800, color: '#64748b', textTransform: 'uppercase' }}>Mandatory Criteria</div>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: '#1e40af', marginTop: 2 }}>
-                          Turnover ≥ ₹10 Cr · MII ≥ 50%
-                        </div>
-                        <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>Active GST & PAN Required</div>
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })}
                 </div>
               )}
             </SectionCard>
@@ -675,8 +731,9 @@ export default function BidderWorkspacePage() {
             TAB 2: UPLOAD & MANAGE DOCUMENTS (THE CORE EXPERIENCE)
            ══════════════════════════════════════════════════════════════════════ */}
         {activeTab === 'UPLOAD' && (
+          <SectionErrorBoundary>
           <div>
-            {myBids.length === 0 ? (
+            {(!Array.isArray(myBids) || myBids.length === 0) ? (
               <SectionCard title="No Active Bid Package">
                 <div style={{ textAlign: 'center', padding: '32px 0' }}>
                   <div style={{ fontSize: 32, marginBottom: 8 }}>📌</div>
@@ -704,7 +761,7 @@ export default function BidderWorkspacePage() {
                         onChange={e => setSelectedBidId(e.target.value)}
                         style={{ width: '100%', padding: '9px 14px', borderRadius: 8, border: '1px solid #cbd5e1', fontSize: 13, fontWeight: 700, color: '#0f172a', background: '#fff' }}
                       >
-                        {myBids.map(b => {
+                        {(Array.isArray(myBids) ? myBids : []).map(b => {
                           const bId = b.id || b._id;
                           const t = resolveTender(b.tender_id || b.tender_reference);
                           const tRef = t?.reference_number || t?.tender_no || b.tender_reference || 'Tender';
@@ -836,14 +893,17 @@ export default function BidderWorkspacePage() {
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
                     {STANDARD_CHECKLIST.map(item => {
                       // Check if satisfied in uploaded documents or evidence
-                      const matchedDoc = bidDocuments.find(d => 
+                      const safeDocList = Array.isArray(bidDocuments) ? bidDocuments : [];
+                      const safeEvList = Array.isArray(bidEvidence) ? bidEvidence : [];
+                      const docTypePrefix = (item.doc_type || '').toLowerCase().split('_')[0];
+                      const matchedDoc = safeDocList.find(d =>
                         (d.document_type === item.doc_type || d.doc_type === item.doc_type) ||
-                        (d.original_filename && d.original_filename.toLowerCase().includes(item.doc_type.toLowerCase().split('_')[0]))
+                        (d.original_filename && d.original_filename.toLowerCase().includes(docTypePrefix))
                       );
-                      const matchedEvidence = bidEvidence.find(e => 
-                        e.field_name === item.metric || 
-                        e.field === item.metric ||
-                        (item.evidenceKey && (e.field_name === item.evidenceKey || e.field === item.evidenceKey))
+                      const matchedEvidence = safeEvList.find(e =>
+                        (item.evidenceKey && (e.field_name === item.evidenceKey || e.field === item.evidenceKey)) ||
+                        e.field_name === item.metric ||
+                        e.field === item.metric
                       );
 
                       const isSatisfied = !!(matchedDoc || matchedEvidence);
@@ -884,7 +944,9 @@ export default function BidderWorkspacePage() {
                             {/* Extracted Evidence Snippet */}
                             {matchedEvidence && (
                               <div style={{ marginTop: 8, padding: '6px 10px', background: '#fff', border: '1px solid #86efac', borderRadius: 6, fontSize: 11, color: '#166534', fontWeight: 700 }}>
-                                ✓ Extracted Value: {item.formatValue ? item.formatValue(matchedEvidence.normalized_value ?? matchedEvidence.raw_value) : String(matchedEvidence.raw_value)}
+                                ✓ Extracted Value: {item.formatValue
+                                  ? (() => { try { return safeStr(item.formatValue(safeStr(matchedEvidence.normalized_value) ?? safeStr(matchedEvidence.raw_value))); } catch { return safeStr(matchedEvidence.raw_value); } })()
+                                  : safeStr(matchedEvidence.raw_value)}
                               </div>
                             )}
                             {!matchedEvidence && matchedDoc && (
@@ -944,12 +1006,12 @@ export default function BidderWorkspacePage() {
                     </div>
 
                     {/* Rule Results Breakdown */}
-                    {evalResult.rule_results && (
+                    {Array.isArray(evalResult.rule_results) && evalResult.rule_results.length > 0 && (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                         {evalResult.rule_results.map((r, idx) => (
                           <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0' }}>
                             <div>
-                              <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>{r.explanation}</div>
+                              <div style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>{r.explanation || r.rule_id}</div>
                               <div style={{ fontSize: 10, color: '#64748b', marginTop: 2, fontFamily: 'monospace' }}>Rule ID: {r.rule_id}</div>
                             </div>
                             <StatusPill status={r.status} />
@@ -982,15 +1044,18 @@ export default function BidderWorkspacePage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {bidDocuments.map((doc, idx) => {
-                            const dId = doc.id || doc._id;
+                          {(Array.isArray(bidDocuments) ? bidDocuments : []).map((doc, idx) => {
+                            const dId = String(doc.id || doc._id || '');
                             const dType = doc.document_type || doc.doc_type || 'UNKNOWN';
                             const conf = doc.classification_confidence || doc.doc_type_confidence || 0.95;
                             const procBy = doc.processed_by || 'Vision Engine';
-                            const isAi = procBy.includes('GEMINI');
-
-                            // Find evidence for this document
-                            const docEvidence = bidEvidence.filter(e => e.document_id === dId || e.doc_id === dId);
+                            const isAi = procBy.includes('GEMINI') || procBy.includes('gemini');
+                            const aiLabel = isAi ? `✨ ${procBy.replace(/_/g, ' ')}` : '⚡ Deterministic OCR';
+                            // Find evidence for this document (safe string comparison)
+                            const safeEv = Array.isArray(bidEvidence) ? bidEvidence : [];
+                            const docEvidence = dId
+                              ? safeEv.filter(e => String(e.document_id || '') === dId || String(e.doc_id || '') === dId)
+                              : [];
                             const extractedFields = doc.extracted_fields || {};
 
                             return (
@@ -999,10 +1064,10 @@ export default function BidderWorkspacePage() {
                                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                                     <FileText size={16} color="#2563eb" />
                                     <div>
-                                      <div style={{ fontWeight: 700, color: '#0f172a' }}>{doc.original_filename || doc.filename}</div>
+                                      <div style={{ fontWeight: 700, color: '#0f172a' }}>{safeStr(doc.original_filename || doc.filename)}</div>
                                       <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>ID: {dId?.slice(-8)}</div>
                                       {doc.legal_name && (
-                                        <div style={{ fontSize: 10, color: '#047857', fontWeight: 600 }}>Entity: {doc.legal_name}</div>
+                                        <div style={{ fontSize: 10, color: '#047857', fontWeight: 600 }}>Entity: {safeStr(doc.legal_name)}</div>
                                       )}
                                     </div>
                                   </div>
@@ -1027,13 +1092,13 @@ export default function BidderWorkspacePage() {
                                       border: `1px solid ${isAi ? '#f0abfc' : '#e2e8f0'}`,
                                       width: 'fit-content',
                                     }}>
-                                      {isAi ? '✨ Gemini 3.5 Flash-Lite' : '⚡ Deterministic OCR'}
+                                      {aiLabel}
                                     </span>
                                     {/* Display extracted field chips */}
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
                                       {docEvidence.length > 0 ? (
-                                        docEvidence.slice(0, 4).map(e => (
-                                          <span key={e.id || e._id || e.field_name} style={{
+                                        docEvidence.map((e, ei) => (
+                                          <span key={e.id || e._id || e.field_name || ei} style={{
                                             fontSize: 10,
                                             padding: '2px 6px',
                                             borderRadius: 4,
@@ -1042,11 +1107,11 @@ export default function BidderWorkspacePage() {
                                             border: '1px solid #bbf7d0',
                                             fontWeight: 600,
                                           }}>
-                                            {e.field_name?.replace(/_/g, ' ')}: <strong>{String(e.normalized_value ?? e.raw_value)}</strong>
+                                            {(e.field_name || '').replace(/_/g, ' ')}: <strong>{safeStr(e.normalized_value ?? e.raw_value)}</strong>
                                           </span>
                                         ))
                                       ) : Object.keys(extractedFields).length > 0 ? (
-                                        Object.entries(extractedFields).slice(0, 4).map(([k, v]) => (
+                                        Object.entries(extractedFields).map(([k, v]) => (
                                           <span key={k} style={{
                                             fontSize: 10,
                                             padding: '2px 6px',
@@ -1056,7 +1121,7 @@ export default function BidderWorkspacePage() {
                                             border: '1px solid #bbf7d0',
                                             fontWeight: 600,
                                           }}>
-                                            {k.replace(/_/g, ' ')}: <strong>{String(v)}</strong>
+                                            {k.replace(/_/g, ' ')}: <strong>{safeStr(v)}</strong>
                                           </span>
                                         ))
                                       ) : (
@@ -1091,6 +1156,7 @@ export default function BidderWorkspacePage() {
               </div>
             )}
           </div>
+          </SectionErrorBoundary>
         )}
 
         {/* ══════════════════════════════════════════════════════════════════════
@@ -1278,6 +1344,87 @@ function DryRunTab({ currentTender, currentBid }) {
           </div>
         </SectionCard>
       )}
+
+      {/* ── Verification Modal for First Time Bidders ── */}
+      {showVerificationModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(15,23,42,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}>
+          <div style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 640, overflow: 'hidden', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)' }}>
+            <div style={{ padding: '24px 32px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: '#0f172a' }}>Action Required: Profile Verification</h3>
+                <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>Upload your compliance PDF to verify your corporate identity.</p>
+              </div>
+              <button onClick={() => { setShowVerificationModal(false); setPendingTenderId(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}>
+                <XCircle size={24} />
+              </button>
+            </div>
+            <div style={{ padding: '32px' }}>
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: 16, marginBottom: 24, fontSize: 13, color: '#1e3a8a', lineHeight: 1.5 }}>
+                <strong>Welcome!</strong> Before you can apply to tenders, you must upload a single PDF containing your corporate verification documents:
+                <ul style={{ margin: '8px 0 0 20px', padding: 0 }}>
+                  <li>GST Registration Certificate</li>
+                  <li>PAN Card</li>
+                  <li>Udyam MSME Certificate (if applicable)</li>
+                  <li>CA Turnover Certificate</li>
+                  <li>Experience / Work Order</li>
+                </ul>
+              </div>
+
+              {/* Upload Dropzone */}
+              <div
+                style={{
+                  border: `2px dashed ${dragOver ? '#3b82f6' : '#cbd5e1'}`, borderRadius: 12, padding: '40px 20px',
+                  textAlign: 'center', background: dragOver ? '#eff6ff' : '#f8fafc', transition: 'all 0.2s ease',
+                  cursor: uploading ? 'wait' : 'pointer'
+                }}
+                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={e => {
+                  e.preventDefault();
+                  setDragOver(false);
+                  if (uploading) return;
+                  if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleVaultUpload(e.dataTransfer.files[0]);
+                  }
+                }}
+                onClick={() => { if (!uploading) fileInputRef.current?.click(); }}
+              >
+                <UploadCloud size={40} color={dragOver ? '#3b82f6' : '#94a3b8'} style={{ margin: '0 auto 16px' }} />
+                <div style={{ fontSize: 15, fontWeight: 700, color: '#334155', marginBottom: 8 }}>
+                  Drag & Drop Compliance PDF
+                </div>
+                <div style={{ fontSize: 12, color: '#64748b' }}>
+                  or click to select file from your computer
+                </div>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  style={{ display: 'none' }}
+                  accept=".pdf,.png,.jpg,.jpeg"
+                  onChange={e => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      handleVaultUpload(e.target.files[0]);
+                    }
+                  }}
+                />
+              </div>
+
+              {uploading && (
+                <div style={{ marginTop: 24 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, fontWeight: 700, color: '#64748b', marginBottom: 8 }}>
+                    <span>Extracting Profile Details...</span>
+                    <span>{uploadPct}%</span>
+                  </div>
+                  <div style={{ height: 6, background: '#f1f5f9', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', background: '#3b82f6', width: `${uploadPct}%`, transition: 'width 0.3s ease' }} />
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

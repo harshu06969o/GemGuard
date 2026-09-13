@@ -999,12 +999,12 @@ class LoginRequest(BaseModel):
 class RegisterBidderRequest(BaseModel):
     username: str
     password: str
-    name: str
-    company_name: str
-    gstin: str
-    pan: str
-    category: str
-    state: str
+    name: Optional[str] = ""
+    company_name: Optional[str] = ""
+    gstin: Optional[str] = ""
+    pan: Optional[str] = ""
+    category: Optional[str] = "UNKNOWN"
+    state: Optional[str] = ""
     udyam_number: Optional[str] = None
     turnover_cr: Optional[float] = None
 
@@ -1042,9 +1042,10 @@ async def register_bidder(body: RegisterBidderRequest, db=Depends(get_db)):
     existing = await db["users"].find_one({"username": body.username})
     if existing:
         raise HTTPException(status_code=409, detail="Username already exists")
-    gstin_check = await db["bidders"].find_one({"gstin": body.gstin})
-    if gstin_check:
-        raise HTTPException(status_code=409, detail="A bidder with this GSTIN already exists")
+    if body.gstin:
+        gstin_check = await db["bidders"].find_one({"gstin": body.gstin})
+        if gstin_check:
+            raise HTTPException(status_code=409, detail="A bidder with this GSTIN already exists")
 
     bidder_doc = {
         "name": body.company_name, "legal_name": body.company_name,

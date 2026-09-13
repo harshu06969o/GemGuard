@@ -88,13 +88,6 @@ export default function LoginPage() {
       await registerBidder({
         username: regUsername.trim(),
         password: regPassword,
-        name: regFullName.trim(),
-        company_name: companyName.trim(),
-        gstin: gstin.trim().toUpperCase(),
-        pan: pan.trim().toUpperCase(),
-        category,
-        state,
-        turnover_cr: parseFloat(turnover) || 0,
       });
       navigate('/my-bids', { replace: true });
     } catch (err) {
@@ -260,49 +253,9 @@ export default function LoginPage() {
         ) : (
           /* REGISTER FORM */
           <form onSubmit={handleRegister}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-              <div>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>COMPANY LEGAL NAME</label>
-                <input type="text" required placeholder="Infralink Tech Ltd"
-                  value={companyName} onChange={e => setCompanyName(e.target.value)} style={SMALL_INPUT_STYLE} />
-              </div>
-              <div>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>AUTHORIZED REP</label>
-                <input type="text" required placeholder="Rajesh Kumar"
-                  value={regFullName} onChange={e => setRegFullName(e.target.value)} style={SMALL_INPUT_STYLE} />
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-              <div>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>GSTIN (15 chars)</label>
-                <input type="text" required placeholder="07AACCI4520M1ZP" maxLength={15}
-                  value={gstin} onChange={e => setGstin(e.target.value.toUpperCase())}
-                  style={{ ...SMALL_INPUT_STYLE, fontFamily: 'monospace' }} />
-              </div>
-              <div>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>PAN (10 chars)</label>
-                <input type="text" required placeholder="AACCI4520M" maxLength={10}
-                  value={pan} onChange={e => setPan(e.target.value.toUpperCase())}
-                  style={{ ...SMALL_INPUT_STYLE, fontFamily: 'monospace' }} />
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-              <div>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>ENTERPRISE CATEGORY</label>
-                <select value={category} onChange={e => setCategory(e.target.value)}
-                  style={{ ...SMALL_INPUT_STYLE, background: '#1e293b' }}>
-                  <option value="MSME">MSME (Udyam Verified)</option>
-                  <option value="STARTUP">DPIIT Recognized Startup</option>
-                  <option value="LARGE">Large Commercial Enterprise</option>
-                </select>
-              </div>
-              <div>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>ANNUAL TURNOVER (₹ Cr)</label>
-                <input type="number" step="0.1" required placeholder="14.2"
-                  value={turnover} onChange={e => setTurnover(e.target.value)} style={SMALL_INPUT_STYLE} />
-              </div>
+            <div style={{ textAlign: 'center', marginBottom: 24 }}>
+              <h3 style={{ color: '#fff', fontSize: 18, marginBottom: 8 }}>Create Bidder Account</h3>
+              <p style={{ color: '#94a3b8', fontSize: 13 }}>Enter your desired login credentials. Your company details will be automatically verified when you upload your compliance documents.</p>
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>

@@ -339,6 +339,15 @@ class DocumentClassifier:
             "regex": [r"local\s+content[\s\S]{1,30}?[0-9]+(?:\.[0-9]+)?\s*%"],
             "weight": 1.3,
         },
+        "EXPERIENCE_CERTIFICATE": {
+            "keywords": [
+                "experience certificate", "completion certificate", "work order",
+                "purchase order", "contract value", "satisfactorily completed",
+                "project cost", "executed value", "performance certificate",
+            ],
+            "regex": [r"completion\s+certificate", r"work\s+order"],
+            "weight": 1.3,
+        },
     }
 
     @classmethod
@@ -412,19 +421,24 @@ class GeminiBidDocumentExtractor:
 
     @classmethod
     def resolve_candidate_models(cls, user_model: Optional[str] = None) -> List[str]:
-        raw = (user_model or os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite").strip()
+        raw = (user_model or os.getenv("GEMINI_MODEL") or "gemini-2.0-flash-lite").strip()
         cleaned = raw.lower().replace(" ", "-").replace("_", "-")
         if cleaned.startswith("models/"):
             cleaned = cleaned[7:]
         candidates = []
         if cleaned and cleaned not in candidates:
             candidates.append(cleaned)
-        if "gemini-3.5-flash-lite" not in candidates:
-            candidates.insert(0, "gemini-3.5-flash-lite")
-        for lite in ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemini-2.0-flash-lite-preview-02-05"]:
-            if lite not in candidates:
-                candidates.append(lite)
+        # Real Gemini model fallback chain (ordered by preference)
+        for model in [
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+        ]:
+            if model not in candidates:
+                candidates.append(model)
         return candidates
+
 
     @classmethod
     async def extract_with_gemini(
@@ -470,7 +484,7 @@ class GeminiBidDocumentExtractor:
             "        - 'enterprise_type': 'MICRO', 'SMALL', or 'MEDIUM' (string).\n"
             "        - 'local_content_percentage': Domestic value addition % for Make in India (float, e.g. 65.5).\n"
             "        - 'class_local_supplier': 'CLASS_I', 'CLASS_II', or 'NON_LOCAL' (string).\n"
-            "        - 'work_order_value_cr': Value of work order or contract in INR Crores (float).\n"
+            "        - 'experience_value_cr': Value of work order or contract in INR Crores (float).\n"
             "        - 'past_experience_years': Number of years in business or relevant field (float).\n"
             "        - 'date_of_incorporation': Date of incorporation or registration (string).\n"
             "        - 'registered_address': Registered office address (string).\n"
@@ -526,7 +540,11 @@ class GeminiBidDocumentExtractor:
                         if c_list:
                             parts = c_list[0].get("content", {}).get("parts", [])
                             if parts:
-                                raw_text = parts[0].get("text", "{}")
+                                raw_text = parts[0].get("text", "{}").strip()
+                                if raw_text.startswith("```"):
+                                    raw_text = raw_text.split("\n", 1)[-1]
+                                    if raw_text.rfind("```") != -1:
+                                        raw_text = raw_text[:raw_text.rfind("```")].strip()
                                 parsed_result = json.loads(raw_text)
                                 logger.info("Gemini bid document extraction succeeded with %s", candidate)
                                 break
@@ -610,6 +628,31 @@ class EvidenceExtractor:
         target_page = hint_page if 1 <= hint_page <= max(len(pages), 1) else 1
         return target_page, [100.0, 150.0, 900.0, 250.0], 0.85
 
+    @staticmethod
+    def _coerce_to_scalar(value: Any) -> Any:
+        """
+        Converts any complex value (dict, list, nested object) returned by Gemini
+        into a plain scalar (string or float) so it is safe to render in React.
+        """
+        if value is None:
+            return None
+        if isinstance(value, (int, float, bool)):
+            return value
+        if isinstance(value, str):
+            return value.strip() or None
+        if isinstance(value, dict):
+            # Try common scalar sub-keys first
+            for key in ("value", "amount", "number", "text", "name", "val"):
+                if key in value:
+                    return EvidenceExtractor._coerce_to_scalar(value[key])
+            # Fall back to JSON string
+            import json
+            return json.dumps(value, ensure_ascii=False)
+        if isinstance(value, list):
+            import json
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
     @classmethod
     def create_evidence_from_ai_entities(
         cls,
@@ -644,8 +687,9 @@ class EvidenceExtractor:
             fn = ent.get("field_name")
             if not fn or fn == "legal_entity_name":
                 continue
-            norm_val = ent.get("normalized_value")
-            raw_val = ent.get("raw_value") or str(norm_val)
+            raw_norm = ent.get("normalized_value")
+            norm_val = cls._coerce_to_scalar(raw_norm)
+            raw_val = ent.get("raw_value") or str(norm_val or "")
             page_hint = int(ent.get("page_number") or 1)
             snippet = ent.get("snippet", "")
             conf = float(ent.get("confidence") or 0.95)
@@ -706,10 +750,24 @@ class EvidenceExtractor:
             if ev:
                 evidence_list.extend(ev)
 
-        # General pass: search for any statutory numbers in any document
-        if not evidence_list:
-            ev_general = cls._general_statutory_extraction(document_id, pages, package_id, bidder_id)
-            evidence_list.extend(ev_general)
+        elif doc_type == "EXPERIENCE_CERTIFICATE" or doc_type == "WORK_ORDER":
+            ev = cls._extract_experience(document_id, pages, package_id, bidder_id)
+            if ev:
+                evidence_list.extend(ev)
+
+        # Always run UDIN extraction for CA certificates
+        if doc_type == "CA_CERTIFICATE":
+            ev_udin = cls._extract_udin(document_id, pages, package_id, bidder_id)
+            if ev_udin:
+                evidence_list.extend(ev_udin)
+
+        # General pass: search for any statutory numbers in any document if not already found
+        existing_fields = {e.field_name for e in evidence_list}
+        ev_general = cls._general_statutory_extraction(document_id, pages, package_id, bidder_id)
+        for ev in ev_general:
+            if ev.field_name not in existing_fields:
+                evidence_list.append(ev)
+                existing_fields.add(ev.field_name)
 
         return evidence_list
 
@@ -741,17 +799,21 @@ class EvidenceExtractor:
 
         for page in pages:
             lines = page.text.split("\n")
-            for line in lines:
-                if "turnover" in line.lower():
-                    # 1. Prioritize number with monetary unit (Crore/Cr/Lakh/L)
-                    m_unit = re.search(r"(?:Rs\.?|INR)?\s*([0-9]+(?:\.[0-9]+)?)\s*(Crore|Cr|Lakh|L)\b", line, re.IGNORECASE)
+            for i, line in enumerate(lines):
+                if "turnover" in line.lower() or "receipts" in line.lower():
+                    # Check this line and next line
+                    context = line + " " + (lines[i+1] if i+1 < len(lines) else "")
+                    
+                    # 1. Number with monetary unit (Crore/Cr/Lakh/L) with commas
+                    m_unit = re.search(r"(?:Rs\.?|INR|₹)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*(Crore|Cr|Lakh|L)\b", context, re.IGNORECASE)
                     if m_unit:
-                        val = float(m_unit.group(1))
+                        val_str = m_unit.group(1).replace(",", "")
+                        val = float(val_str)
                         unit = (m_unit.group(2) or "").lower()
-                        if "lakh" in unit:
+                        if "lakh" in unit or "l" == unit:
                             val = val / 100.0
                         turnover_val = val
-                        raw_snippet = line.strip()
+                        raw_snippet = context.strip()
                         best_page = page.page_number
                         for b in page.blocks:
                             if m_unit.group(1) in b.text:
@@ -760,11 +822,15 @@ class EvidenceExtractor:
                                 break
                         break
 
-                    # 2. Look for Rs./INR prefix
-                    m_rs = re.search(r"(?:Rs\.?|INR)\s*([0-9]+(?:\.[0-9]+)?)", line, re.IGNORECASE)
+                    # 2. Look for Rs./INR/₹ prefix with commas
+                    m_rs = re.search(r"(?:Rs\.?|INR|₹)\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)", context, re.IGNORECASE)
                     if m_rs:
-                        turnover_val = float(m_rs.group(1))
-                        raw_snippet = line.strip()
+                        val_str = m_rs.group(1).replace(",", "")
+                        turnover_val = float(val_str)
+                        # Auto-convert if it's likely absolute rupees (e.g., > 1,000,000)
+                        if turnover_val > 1000000:
+                            turnover_val = turnover_val / 10000000.0
+                        raw_snippet = context.strip()
                         best_page = page.page_number
                         for b in page.blocks:
                             if m_rs.group(1) in b.text:
@@ -774,10 +840,13 @@ class EvidenceExtractor:
                         break
 
                     # 3. Fallback to number after colon or 'is'
-                    m_gen = re.search(r"(?:is|:)\s*([0-9]+(?:\.[0-9]+)?)", line, re.IGNORECASE)
+                    m_gen = re.search(r"(?:is|:)\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)", context, re.IGNORECASE)
                     if m_gen:
-                        turnover_val = float(m_gen.group(1))
-                        raw_snippet = line.strip()
+                        val_str = m_gen.group(1).replace(",", "")
+                        turnover_val = float(val_str)
+                        if turnover_val > 1000000:
+                            turnover_val = turnover_val / 10000000.0
+                        raw_snippet = context.strip()
                         best_page = page.page_number
                         for b in page.blocks:
                             if m_gen.group(1) in b.text:
@@ -798,20 +867,45 @@ class EvidenceExtractor:
             page_number=best_page,
             bounding_box=best_bbox,
             field_name="annual_turnover_cr",
-            normalized_value=float(turnover_val),
-            raw_value=raw_snippet,
-            confidence=conf,
+            normalized_value=round(turnover_val, 2),
+            raw_value=raw_snippet or f"{turnover_val} Cr",
+            confidence=max(conf, 0.95),
             verification_status="PENDING",
         )]
 
     @classmethod
     def _extract_local_content(cls, doc_id: str, pages: List[ProcessedPage], pkg_id, b_id) -> List[Evidence]:
-        """Extract Make in India local content percentage."""
-        page_num, bbox, raw, conf = cls._find_bbox_for_pattern(pages, r"([0-9]+(?:\.[0-9]+)?)\s*%")
-        m = re.search(r"([0-9]+(?:\.[0-9]+)?)", raw)
-        if not m:
-            return []
-        val = float(m.group(1))
+        """Extract Make in India local content percentage, heavily weighting context."""
+        page_num = 1
+        bbox = [100.0, 100.0, 900.0, 200.0]
+        raw = ""
+        conf = 0.60
+        val = None
+
+        for page in pages:
+            lines = page.text.split("\n")
+            for i, line in enumerate(lines):
+                if any(kw in line.lower() for kw in ["local content", "domestic value", "make in india"]):
+                    # Look around this line
+                    context = " ".join(lines[max(0, i-2):min(len(lines), i+3)])
+                    m = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)\s*%", context)
+                    if m:
+                        val = float(m.group(1))
+                        raw = context.strip()
+                        page_num = page.page_number
+                        conf = 0.95
+                        break
+            if val is not None:
+                break
+        
+        if val is None:
+            # Fallback to any percentage if it's explicitly a MII_DECLARATION
+            page_num, bbox, raw, conf = cls._find_bbox_for_pattern(pages, r"([0-9]{1,3}(?:\.[0-9]+)?)\s*%")
+            m = re.search(r"([0-9]{1,3}(?:\.[0-9]+)?)", raw)
+            if m:
+                val = float(m.group(1))
+            else:
+                return []
 
         return [Evidence(
             document_id=doc_id,
@@ -896,24 +990,85 @@ class EvidenceExtractor:
         )]
 
     @classmethod
-    def _general_statutory_extraction(cls, doc_id: str, pages: List[ProcessedPage], pkg_id, b_id) -> List[Evidence]:
-        """Extract GSTIN or PAN if detected in unclassified documents."""
-        res: List[Evidence] = []
+    def _extract_experience(cls, doc_id: str, pages: List[ProcessedPage], pkg_id, b_id) -> List[Evidence]:
+        """Extract Work Order / Project Experience Value."""
+        val = None
+        best_page = 1
+        best_bbox = [100.0, 100.0, 900.0, 200.0]
+        raw = ""
+        conf = 0.60
+
         for page in pages:
-            gst_m = re.search(r"\b([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})\b", page.text)
-            if gst_m:
-                res.append(Evidence(
-                    document_id=doc_id,
-                    package_id=pkg_id,
-                    bidder_id=b_id,
-                    page_number=page.page_number,
-                    bounding_box=[100.0, 100.0, 900.0, 200.0],
-                    field_name="gstin",
-                    normalized_value=gst_m.group(1),
-                    confidence=0.95,
-                ))
+            lines = page.text.split("\n")
+            for i, line in enumerate(lines):
+                if any(kw in line.lower() for kw in ["value", "cost", "amount", "worth", "price"]):
+                    context = line + " " + (lines[i+1] if i+1 < len(lines) else "")
+                    
+                    # 1. Number with monetary unit (Crore/Cr/Lakh/L) with commas
+                    m_unit = re.search(r"(?:Rs\.?|INR|₹)?\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)\s*(Crore|Cr|Lakh|L)\b", context, re.IGNORECASE)
+                    if m_unit:
+                        val_str = m_unit.group(1).replace(",", "")
+                        val = float(val_str)
+                        unit = (m_unit.group(2) or "").lower()
+                        if "lakh" in unit or "l" == unit:
+                            val = val / 100.0
+                        raw = context.strip()
+                        best_page = page.page_number
+                        conf = 0.90
+                        break
+
+                    # 2. Look for Rs./INR/₹ prefix with commas
+                    m_rs = re.search(r"(?:Rs\.?|INR|₹)\s*([0-9]+(?:,[0-9]+)*(?:\.[0-9]+)?)", context, re.IGNORECASE)
+                    if m_rs:
+                        val_str = m_rs.group(1).replace(",", "")
+                        temp_val = float(val_str)
+                        # Assume if it's large, it's absolute rupees
+                        if temp_val > 100000:
+                            val = temp_val / 10000000.0
+                            raw = context.strip()
+                            best_page = page.page_number
+                            conf = 0.85
+                            break
+            if val is not None:
                 break
-        return res
+                
+        if val is None:
+            return []
+
+        return [Evidence(
+            document_id=doc_id,
+            package_id=pkg_id,
+            bidder_id=b_id,
+            page_number=best_page,
+            bounding_box=best_bbox,
+            field_name="experience_value_cr",
+            normalized_value=round(val, 2),
+            raw_value=raw or f"{val} Cr",
+            confidence=max(conf, 0.85),
+            verification_status="PENDING",
+        )]
+
+    @classmethod
+    def _general_statutory_extraction(cls, doc_id: str, pages: List[ProcessedPage], pkg_id, b_id) -> List[Evidence]:
+        """Extract all statutory fields if detected in unclassified documents."""
+        res: List[Evidence] = []
+        
+        res.extend(cls._extract_gstin(doc_id, pages, pkg_id, b_id))
+        res.extend(cls._extract_pan(doc_id, pages, pkg_id, b_id))
+        res.extend(cls._extract_udyam(doc_id, pages, pkg_id, b_id))
+        res.extend(cls._extract_turnover(doc_id, pages, pkg_id, b_id))
+        res.extend(cls._extract_local_content(doc_id, pages, pkg_id, b_id))
+        res.extend(cls._extract_experience(doc_id, pages, pkg_id, b_id))
+        
+        # Deduplicate based on field_name
+        unique_res = []
+        seen = set()
+        for ev in res:
+            if ev.field_name not in seen:
+                seen.add(ev.field_name)
+                unique_res.append(ev)
+                
+        return unique_res
 
 
 # ── 4. Main Pipeline Orchestrator ─────────────────────────────────────────────
@@ -970,11 +1125,12 @@ class BidDocumentProcessor:
             logger.warning("Gemini extraction invocation note: %s", ai_err)
 
         if ai_result:
-            processed_by = "GEMINI_3.5_FLASH_LITE"
+            processed_by = f"GEMINI_{(os.getenv('GEMINI_MODEL') or 'gemini-2.0-flash-lite').upper().replace('-', '_').replace('.', '_')}"
             if ai_result.get("document_type") and ai_result["document_type"] != "OTHER":
                 doc_type = ai_result["document_type"]
             class_conf = float(ai_result.get("classification_confidence") or class_conf)
-            legal_name = ai_result.get("legal_name")
+            legal_name_raw = ai_result.get("legal_name")
+            legal_name = EvidenceExtractor._coerce_to_scalar(legal_name_raw) if legal_name_raw else None
             extracted_ev = EvidenceExtractor.create_evidence_from_ai_entities(
                 document_id=document_id,
                 pages=pages,
@@ -999,7 +1155,11 @@ class BidDocumentProcessor:
 
         # 5. Persist to MongoDB if db connection is provided
         if db is not None:
-            extracted_fields_map = {e.field_name: e.normalized_value for e in extracted_ev}
+            # Sanitize extracted fields — ensure all values are scalars safe for MongoDB + React
+            extracted_fields_map = {
+                e.field_name: EvidenceExtractor._coerce_to_scalar(e.normalized_value)
+                for e in extracted_ev
+            }
 
             # Update document record
             try:
@@ -1045,7 +1205,7 @@ class BidDocumentProcessor:
                         "has_documents": True,
                     }
                     for ev in extracted_ev:
-                        bid_updates[f"extracted_data.{ev.field_name}"] = ev.normalized_value
+                        bid_updates[f"extracted_data.{ev.field_name}"] = EvidenceExtractor._coerce_to_scalar(ev.normalized_value)
 
                     if legal_name:
                         bid_updates["extracted_data.legal_entity_name"] = legal_name

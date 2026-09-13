@@ -143,6 +143,21 @@ export const getTenderBids = (tenderId) => request(`/v1/tenders/${tenderId}/bids
 export const listBidders = () => request('/v1/bidders');
 export const getBidder = (id) => request(`/v1/bidders/${id}`);
 export const getMyProfile = () => request('/v1/bidders/me/profile');
+export const listBidderVaultDocuments = () => request('/v1/bidders/me/documents');
+export const uploadBidderVaultDocument = (file, docType = null, onProgress = null) => {
+  let progressFn = onProgress;
+  let categoryHint = docType;
+  if (typeof docType === 'function') {
+    progressFn = docType;
+    categoryHint = null;
+  }
+  const fd = new FormData();
+  fd.append('file', file);
+  if (categoryHint) {
+    fd.append('doc_category', categoryHint);
+  }
+  return uploadWithProgress(`/v1/bidders/me/documents/upload`, fd, progressFn);
+};
 
 // ── Bids ─────────────────────────────────────────────────────────────────────
 
