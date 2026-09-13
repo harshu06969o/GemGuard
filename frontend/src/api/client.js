@@ -161,10 +161,26 @@ export const submitOfficerAction = (bidId, payload) =>
 export const listBidDocuments = (bidId) => request(`/v1/bids/${bidId}/documents`);
 export const listBidEvidence = (bidId) => request(`/v1/bids/${bidId}/evidence`);
 export const getBidDocument = (bidId, docId) => request(`/v1/bids/${bidId}/documents/${docId}`);
-export const uploadBidderDocument = (bidId, file, onProgress) => {
+export const uploadBidderDocument = (bidId, file, docType = null, onProgress = null) => {
+  let progressFn = onProgress;
+  let categoryHint = docType;
+  if (typeof docType === 'function') {
+    progressFn = docType;
+    categoryHint = null;
+  }
   const fd = new FormData();
   fd.append('file', file);
-  return uploadWithProgress(`/v1/bids/${bidId}/documents/upload`, fd, onProgress);
+  if (categoryHint) {
+    fd.append('document_type', categoryHint);
+  }
+  return uploadWithProgress(`/v1/bids/${bidId}/documents/upload`, fd, progressFn);
+};
+export const uploadBidPackage = (bidId, files, onProgress = null) => {
+  const fd = new FormData();
+  for (const f of files) {
+    fd.append('files', f);
+  }
+  return uploadWithProgress(`/v1/bids/${bidId}/package/upload`, fd, onProgress);
 };
 export const deleteBidDocument = (bidId, docId) =>
   request(`/v1/bids/${bidId}/documents/${docId}`, { method: 'DELETE' });

@@ -16,8 +16,7 @@ bcrypt==4.3.0
 python-jose[cryptography]==3.3.0
 pyjwt>=2.10.0
 passlib[bcrypt]>=1.7.4
-# AI/ML & Data Processing
-openai==1.93.0
+# AI/ML & Data Processing (Google Gemini uses httpx REST calls)
 pdfplumber==0.11.7
 python-docx>=1.1.0
 pandas>=2.2.0

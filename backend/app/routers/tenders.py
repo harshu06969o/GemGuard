@@ -488,6 +488,7 @@ async def upload_and_compile_tender(
             r_dict["source"] = "AI_COMPILER"
             insert_res = await db["rules"].insert_one(r_dict)
             r_dict["id"] = str(insert_res.inserted_id)
+            r_dict.pop("_id", None)
             saved_rules.append(r_dict)
 
         # Embed compiled rules in the tender document
@@ -513,7 +514,8 @@ async def upload_and_compile_tender(
 
     refreshed_tender = await db["tenders"].find_one({"_id": tender_doc["_id"]})
     tender_response = doc_to_dict(refreshed_tender)
-    tender_response["requirement_rules"] = saved_rules or tender_response.get("requirement_rules", [])
+    clean_saved = [doc_to_dict(r) for r in saved_rules]
+    tender_response["requirement_rules"] = clean_saved or tender_response.get("requirement_rules", [])
     tender_response["rules"] = tender_response["requirement_rules"]
 
     if not is_valid_tender:
@@ -531,7 +533,7 @@ async def upload_and_compile_tender(
         "is_tender": True,
         "message": f"Successfully parsed tender PDF and compiled {len(saved_rules)} compliance rules.",
         "tender": tender_response,
-        "rules": [doc_to_dict(r) for r in saved_rules],
+        "rules": clean_saved,
         "diagnostics": diagnostics,
     }
 

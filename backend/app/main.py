@@ -83,8 +83,8 @@ USE_REAL_MONGO = os.getenv("USE_REAL_MONGO", "0") == "1"
 JWT_SECRET = os.getenv("JWT_SECRET", "sih_26100_supersecret")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "24"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "") or os.getenv("GOOGLE_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 # --- Logging ----------------------------------------------------------------
 

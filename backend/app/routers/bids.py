@@ -6,7 +6,7 @@ Modular routing for Bids, Document Processing, Evidence, Evaluation, and Officer
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 
 from app.core.database import doc_to_dict, get_db, safe_oid, to_oid, utcnow_str
@@ -226,9 +226,10 @@ from app.pipeline.document_processor import BidDocumentProcessor
 async def upload_bid_document(
     bid_id: str,
     file: UploadFile = File(...),
+    document_type: Optional[str] = Form(None),
     db=Depends(get_db),
 ):
-    """Upload bid verification document (CA Cert, GSTN, PAN, MSME) and run Vision Document Processor."""
+    """Upload bid verification document (CA Cert, GSTN, PAN, MSME) and run AI Vision Intelligence Document Processor."""
     oid = safe_oid(bid_id)
     conds = [{"_id": oid}] if oid else []
     conds.extend([{"_id": bid_id}, {"id": bid_id}, {"bid_id": bid_id}])
@@ -265,15 +266,18 @@ async def upload_bid_document(
     except Exception:
         pass
 
-    # Execute Vision Intelligence Document Processor (Dual-Engine + Classifier + Evidence Extractor)
+    # Execute Vision Intelligence Document Processor (Dual-Engine + Gemini 3.5 Flash-Lite + Classifier + Evidence Extractor)
     proc_res = await BidDocumentProcessor.process_single_file(
         file_path_or_bytes=stored.file_path,
         filename=file.filename,
         document_id=doc_id,
         package_id=resolved_bid_id,
         bidder_id=bid.get("bidder_id") or resolved_bid_id,
+        document_type_hint=document_type,
         db=db,
     )
+
+    extracted_fields = {e.field_name: e.normalized_value for e in proc_res.extracted_evidence}
 
     return {
         "status": "uploaded_and_processed",
@@ -284,8 +288,11 @@ async def upload_bid_document(
         "size_bytes": stored.size_bytes,
         "document_type": proc_res.classified_type,
         "classification_confidence": proc_res.classification_confidence,
+        "processed_by": proc_res.processed_by,
+        "legal_name": proc_res.legal_name,
         "total_pages": proc_res.total_pages,
         "evidence_count": len(proc_res.extracted_evidence),
+        "extracted_fields": extracted_fields,
         "evidence": [e.model_dump() for e in proc_res.extracted_evidence],
     }
 
@@ -302,6 +309,19 @@ async def delete_bid_document(bid_id: str, doc_id: str, db=Depends(get_db)):
     await db["bid_documents"].delete_many({"$or": doc_conds})
     await db["documents"].delete_many({"$or": doc_conds})
     await db["evidence"].delete_many({"document_id": doc_id})
+
+    # Remove from bid.documents
+    bid_oid = safe_oid(bid_id)
+    bid_q = [{"_id": bid_oid}] if bid_oid else []
+    bid_q.extend([{"_id": bid_id}, {"id": bid_id}, {"bid_id": bid_id}])
+    await db["bids"].update_one(
+        {"$or": bid_q},
+        {
+            "$pull": {"documents": {"document_id": doc_id}},
+            "$set": {"updated_at": utcnow_str()},
+        }
+    )
+
     return {"status": "deleted", "document_id": doc_id}
 
 

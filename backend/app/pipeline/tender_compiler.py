@@ -5,7 +5,7 @@ Strict Specifications:
 2. Domain Verification: Validates whether the uploaded file is a legitimate procurement/RFP document.
    Rejects non-tender documents (resumes, general slides, receipts) from generating fake compliance rules.
 3. Rule Extraction Engine:
-   - When OPENAI_API_KEY is configured: Calls OpenAI (gpt-4o-mini) with structured JSON output.
+   - When GEMINI_API_KEY is configured: Calls Google Gemini Flash-Lite (gemini-3.5-flash-lite) with structured JSON output.
    - When offline / no API key: High-precision deterministic layout-aware regex & table compiler:
      * Financial turnover thresholds (INR Cr)
      * Make in India (MII) local content exact percentages
@@ -31,12 +31,23 @@ from app.schemas.domain import RequirementRule, RuleSeverity
 logger = logging.getLogger("gemguard.tender_compiler")
 
 
-def get_openai_credentials() -> Tuple[str, str]:
-    """Dynamically fetch OpenAI configuration from environment or config."""
-    from app.config import OPENAI_API_KEY as CFG_KEY, OPENAI_MODEL as CFG_MODEL
-    key = os.getenv("OPENAI_API_KEY", "") or CFG_KEY or ""
-    model = os.getenv("OPENAI_MODEL", "") or CFG_MODEL or "gpt-4o-mini"
-    return key.strip(), model.strip()
+def get_ai_credentials() -> Dict[str, str]:
+    """Dynamically fetch Google Gemini configuration from environment or config."""
+    try:
+        from app.config import (
+            GEMINI_API_KEY as CFG_GEMINI_KEY,
+            GEMINI_MODEL as CFG_GEMINI_MODEL,
+        )
+    except Exception:
+        CFG_GEMINI_KEY, CFG_GEMINI_MODEL = "", "gemini-3.5-flash-lite"
+
+    gemini_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or CFG_GEMINI_KEY or "").strip()
+    gemini_model = (os.getenv("GEMINI_MODEL") or CFG_GEMINI_MODEL or "gemini-3.5-flash-lite").strip()
+
+    return {
+        "gemini_key": gemini_key,
+        "gemini_model": gemini_model,
+    }
 
 
 @dataclass
@@ -262,8 +273,8 @@ class RuleExtractionEngine:
 
     def extract_rules(self, parsed_pdf: ParsedPDFDocument) -> List[RequirementRule]:
         """
-        Extract rules using Structured LLM output when available,
-        with high-precision deterministic pattern fallback.
+        Extract rules using Google Gemini Flash-Lite when credentials are configured,
+        with seamless high-precision deterministic pattern fallback.
         """
         # If the document is not an authentic tender, return empty rules
         if not parsed_pdf.is_tender:
@@ -273,29 +284,30 @@ class RuleExtractionEngine:
             )
             return []
 
-        openai_key, openai_model = get_openai_credentials()
+        creds = get_ai_credentials()
 
-        # Attempt structured LLM extraction if OpenAI API key is configured
-        if openai_key and openai_key.startswith("sk-"):
+        # 1. Use Google Gemini Flash-Lite API if GEMINI_API_KEY is configured
+        if creds["gemini_key"]:
             try:
-                llm_rules = self._extract_rules_via_llm(parsed_pdf, openai_key, openai_model)
-                if llm_rules:
-                    logger.info("Successfully extracted %d rules via OpenAI LLM", len(llm_rules))
-                    return llm_rules
+                gemini_rules = self._extract_rules_via_gemini(
+                    parsed_pdf, creds["gemini_key"], creds["gemini_model"]
+                )
+                if gemini_rules:
+                    logger.info("Successfully extracted %d rules via Google Gemini Flash-Lite (%s)", len(gemini_rules), creds["gemini_model"])
+                    return gemini_rules
             except Exception as exc:
-                logger.warning("LLM rule extraction failed (%s). Falling back to deterministic engine.", exc)
+                logger.warning("Gemini Flash-Lite rule extraction failed (%s). Falling back to deterministic engine.", exc)
 
-        # Deterministic extraction
+        # 2. Deterministic extraction (offline resilience)
         rules = self._extract_rules_deterministic(parsed_pdf)
         logger.info("Extracted %d rules via deterministic pattern engine", len(rules))
         return rules
 
-    def _extract_rules_via_llm(
-        self, parsed_pdf: ParsedPDFDocument, openai_key: str, openai_model: str
+    def _extract_rules_via_gemini(
+        self, parsed_pdf: ParsedPDFDocument, api_key: str, model_name: str = "gemini-3.5-flash-lite"
     ) -> List[RequirementRule]:
-        """Call OpenAI API using structured JSON output format."""
-        from openai import OpenAI
-        client = OpenAI(api_key=openai_key)
+        """Call Google Gemini Flash-Lite REST API using structured JSON output format via httpx."""
+        import httpx
 
         tables_context = "\n\n".join(
             f"--- Table on Page {t.page_number} ---\n{t.markdown}"
@@ -303,7 +315,7 @@ class RuleExtractionEngine:
         )
         context = f"=== TENDER DOCUMENT TEXT (Sample) ===\n{parsed_pdf.full_text[:14000]}\n\n=== EXTRACTED TABLES ===\n{tables_context}"
 
-        system_prompt = (
+        prompt = (
             "You are an expert AI Procurement Compliance Architect for Indian Public Procurement (GeM / CPCL).\n"
             "Analyze the tender document text and tables, and extract ONLY legitimate eligibility rules explicitly specified.\n"
             "If the document is NOT a tender or RFP document, output {\"is_tender\": false, \"rules\": []}.\n"
@@ -315,7 +327,7 @@ class RuleExtractionEngine:
             "   - PAN: metric='pan_card_valid', threshold=true, operator='=='\n"
             "   - Udyam / MSME: metric='udyam_registration_active', threshold=true, operator='=='\n"
             "4. EMD or past experience if required in the text.\n\n"
-            "Output valid JSON matching this schema:\n"
+            "Output a JSON object with this schema:\n"
             "{\n"
             "  \"is_tender\": true,\n"
             "  \"rules\": [\n"
@@ -331,21 +343,78 @@ class RuleExtractionEngine:
             "      \"verification_source\": \"GSTN\"\n"
             "    }\n"
             "  ]\n"
-            "}"
+            "}\n\n"
+            f"{context}"
         )
 
-        response = client.chat.completions.create(
-            model=openai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context},
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
             ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-        )
+            "generationConfig": {
+                "response_mime_type": "application/json",
+                "temperature": 0.0,
+            }
+        }
 
-        raw_content = response.choices[0].message.content or "{}"
-        parsed = json.loads(raw_content)
+        # Model resolution: prioritizes gemini-3.5-flash-lite as requested by user
+        def _resolve_candidate_models(m_name: str) -> List[str]:
+            raw = (m_name or "").strip()
+            cleaned = raw.lower().replace(" ", "-").replace("_", "-")
+            if cleaned.startswith("models/"):
+                cleaned = cleaned[7:]
+            candidates = []
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+            if "gemini-3.5-flash-lite" not in candidates:
+                candidates.insert(0, "gemini-3.5-flash-lite")
+            # Alternative Flash-Lite endpoints in case of API version availability
+            for lite in ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite", "gemini-2.0-flash-lite-preview-02-05"]:
+                if lite not in candidates:
+                    candidates.append(lite)
+            return candidates
+
+        models_to_try = _resolve_candidate_models(model_name)
+        last_error = None
+        data = None
+
+        with httpx.Client(timeout=30.0) as client:
+            for candidate in models_to_try:
+                endpoint_model = f"models/{candidate}" if not candidate.startswith("models/") else candidate
+                url = f"https://generativelanguage.googleapis.com/v1beta/{endpoint_model}:generateContent?key={api_key}"
+                try:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        break
+                    elif resp.status_code == 404:
+                        logger.warning("Gemini model %s not found (404). Trying next candidate...", candidate)
+                        last_error = resp.text
+                        continue
+                    else:
+                        resp.raise_for_status()
+                except Exception as ex:
+                    last_error = ex
+                    logger.warning("Gemini invocation with %s failed: %s", candidate, ex)
+                    continue
+
+        if data is None:
+            raise RuntimeError(f"Gemini API calls failed for candidates {models_to_try}: {last_error}")
+
+        candidates_list = data.get("candidates", [])
+        if not candidates_list:
+            return []
+
+        parts = candidates_list[0].get("content", {}).get("parts", [])
+        if not parts:
+            return []
+
+        raw_text = parts[0].get("text", "{}")
+        parsed = json.loads(raw_text)
 
         if not parsed.get("is_tender", True):
             return []
@@ -358,7 +427,7 @@ class RuleExtractionEngine:
                 rule_obj = RequirementRule(**r)
                 rules.append(rule_obj)
             except Exception as parse_err:
-                logger.warning("Skipped invalid LLM rule item: %s (%s)", r, parse_err)
+                logger.warning("Skipped invalid Gemini rule item: %s (%s)", r, parse_err)
 
         return rules
 
@@ -564,7 +633,7 @@ class TenderCompiler:
     Main Orchestrator for Tender Ingestion & Compilation:
     1. Ingests PDF bytes or path
     2. Runs PyMuPDF parser with table capture & domain verification
-    3. Executes structured rule extraction engine (LLM with deterministic fallback)
+    3. Executes structured rule extraction engine (Google Gemini Flash-Lite / Deterministic)
     4. Produces validated Tender metadata and RequirementRule models
     """
 

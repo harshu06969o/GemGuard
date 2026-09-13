@@ -310,8 +310,10 @@ export default function BidderWorkspacePage() {
     setUploadPct(15);
     setError(null);
     try {
-      const res = await uploadBidderDocument(selectedBidId, file, pct => setUploadPct(pct));
-      setSuccessMsg(`✓ ${file.name} uploaded & processed! Extracted ${res?.evidence_count ?? 1} compliance figures.`);
+      const res = await uploadBidderDocument(selectedBidId, file, targetDocType, pct => setUploadPct(pct));
+      const isGemini = res?.processed_by === 'GEMINI_3.5_FLASH_LITE';
+      const aiBadge = isGemini ? '✨ Gemini 3.5 Flash-Lite' : 'Vision Engine';
+      setSuccessMsg(`✓ ${file.name} parsed by ${aiBadge}! Extracted ${res?.evidence_count ?? 1} compliance figures.`);
 
       // Immediately refresh documents and evidence in UI
       const [docsRes, evRes] = await Promise.allSettled([
@@ -974,7 +976,7 @@ export default function BidderWorkspacePage() {
                       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
                         <thead>
                           <tr style={{ borderBottom: '2px solid #f1f5f9', background: '#f8fafc' }}>
-                            {['Document Name', 'Classified Type', 'Pages / Size', 'Uploaded At', 'Actions'].map(h => (
+                            {['Document Name', 'Classified Type', 'AI Parsing & Extracted Data', 'Pages / Size', 'Uploaded At', 'Actions'].map(h => (
                               <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontSize: 11, fontWeight: 800, color: '#475569' }}>{h}</th>
                             ))}
                           </tr>
@@ -984,6 +986,12 @@ export default function BidderWorkspacePage() {
                             const dId = doc.id || doc._id;
                             const dType = doc.document_type || doc.doc_type || 'UNKNOWN';
                             const conf = doc.classification_confidence || doc.doc_type_confidence || 0.95;
+                            const procBy = doc.processed_by || 'Vision Engine';
+                            const isAi = procBy.includes('GEMINI');
+
+                            // Find evidence for this document
+                            const docEvidence = bidEvidence.filter(e => e.document_id === dId || e.doc_id === dId);
+                            const extractedFields = doc.extracted_fields || {};
 
                             return (
                               <tr key={dId || idx} style={{ borderBottom: '1px solid #f1f5f9' }}>
@@ -993,6 +1001,9 @@ export default function BidderWorkspacePage() {
                                     <div>
                                       <div style={{ fontWeight: 700, color: '#0f172a' }}>{doc.original_filename || doc.filename}</div>
                                       <div style={{ fontSize: 10, color: '#64748b', fontFamily: 'monospace' }}>ID: {dId?.slice(-8)}</div>
+                                      {doc.legal_name && (
+                                        <div style={{ fontSize: 10, color: '#047857', fontWeight: 600 }}>Entity: {doc.legal_name}</div>
+                                      )}
                                     </div>
                                   </div>
                                 </td>
@@ -1000,9 +1011,59 @@ export default function BidderWorkspacePage() {
                                   <span style={{ fontSize: 11, fontWeight: 700, padding: '3px 8px', borderRadius: 4, background: '#eff6ff', color: '#1d4ed8' }}>
                                     {dType}
                                   </span>
-                                  <span style={{ fontSize: 10, color: '#64748b', marginLeft: 6 }}>
-                                    ({Math.round(conf * 100)}% conf)
-                                  </span>
+                                  <div style={{ fontSize: 10, color: '#64748b', marginTop: 3 }}>
+                                    {Math.round(conf * 100)}% conf
+                                  </div>
+                                </td>
+                                <td style={{ padding: '12px 14px' }}>
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    <span style={{
+                                      fontSize: 10,
+                                      fontWeight: 800,
+                                      padding: '2px 7px',
+                                      borderRadius: 4,
+                                      background: isAi ? '#fdf4ff' : '#f1f5f9',
+                                      color: isAi ? '#9333ea' : '#475569',
+                                      border: `1px solid ${isAi ? '#f0abfc' : '#e2e8f0'}`,
+                                      width: 'fit-content',
+                                    }}>
+                                      {isAi ? '✨ Gemini 3.5 Flash-Lite' : '⚡ Deterministic OCR'}
+                                    </span>
+                                    {/* Display extracted field chips */}
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+                                      {docEvidence.length > 0 ? (
+                                        docEvidence.slice(0, 4).map(e => (
+                                          <span key={e.id || e._id || e.field_name} style={{
+                                            fontSize: 10,
+                                            padding: '2px 6px',
+                                            borderRadius: 4,
+                                            background: '#f0fdf4',
+                                            color: '#166534',
+                                            border: '1px solid #bbf7d0',
+                                            fontWeight: 600,
+                                          }}>
+                                            {e.field_name?.replace(/_/g, ' ')}: <strong>{String(e.normalized_value ?? e.raw_value)}</strong>
+                                          </span>
+                                        ))
+                                      ) : Object.keys(extractedFields).length > 0 ? (
+                                        Object.entries(extractedFields).slice(0, 4).map(([k, v]) => (
+                                          <span key={k} style={{
+                                            fontSize: 10,
+                                            padding: '2px 6px',
+                                            borderRadius: 4,
+                                            background: '#f0fdf4',
+                                            color: '#166534',
+                                            border: '1px solid #bbf7d0',
+                                            fontWeight: 600,
+                                          }}>
+                                            {k.replace(/_/g, ' ')}: <strong>{String(v)}</strong>
+                                          </span>
+                                        ))
+                                      ) : (
+                                        <span style={{ fontSize: 10, color: '#94a3b8' }}>Processed</span>
+                                      )}
+                                    </div>
+                                  </div>
                                 </td>
                                 <td style={{ padding: '12px 14px', fontSize: 12, color: '#475569' }}>
                                   {doc.page_count ? `${doc.page_count} pg` : '1 pg'} · {doc.size_bytes ? `${Math.round(doc.size_bytes / 1024)} KB` : 'PDF'}
