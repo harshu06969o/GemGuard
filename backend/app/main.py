@@ -1330,24 +1330,30 @@ async def upload_bidder_vault_document(
     with open(save_path, "wb") as f:
         f.write(content)
 
-    extracted_text, page_count, method = "", 0, "NONE"
-    if ext.lower() == ".pdf":
-        extracted_text, page_count, method = extract_pdf_text(save_path)
-    elif ext.lower() in (".jpg", ".jpeg", ".png"):
-        method = "TESSERACT"
-        try:
-            import pytesseract, cv2
-            img = cv2.imread(save_path)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-            extracted_text = pytesseract.image_to_string(thresh, config="--oem 3 --psm 6")
-            page_count = 1
-        except Exception as e:
-            logger.warning("Image OCR: %s", e)
+    from app.pipeline.document_processor import BidDocumentProcessor
+    proc_res = await BidDocumentProcessor.process_single_file(
+        file_path_or_bytes=save_path,
+        filename=file.filename,
+        document_id=str(uuid.uuid4()),
+        bidder_id=bidder_id,
+        document_type_hint=doc_category,
+        db=db
+    )
 
-    detected_type, doc_conf = classify_document(extracted_text) if extracted_text else ("UNKNOWN", 0.0)
-    final_doc_type = doc_category or detected_type
-    entities = extract_entities(extracted_text, final_doc_type) if extracted_text else []
+    entities = []
+    for ev in proc_res.extracted_evidence:
+        entities.append({
+            "field": ev.field_name,
+            "raw_value": ev.raw_value,
+            "normalized_value": ev.normalized_value,
+            "confidence": ev.confidence,
+            "extraction_method": proc_res.processed_by,
+            "source_page": ev.page_number,
+            "source_snippet": "",
+            "verification_status": ev.verification_status,
+            "extracted_at": utcnow_str(),
+            "doc_type": proc_res.classified_type,
+        })
 
     doc_record = {
         "bidder_id": bidder_id,
@@ -1355,10 +1361,10 @@ async def upload_bidder_vault_document(
         "original_filename": file.filename,
         "file_hash": sha256(content.decode("latin-1", errors="replace")),
         "file_size": len(content),
-        "doc_type": final_doc_type,
-        "doc_type_confidence": doc_conf,
-        "page_count": page_count,
-        "extraction_method": method,
+        "doc_type": proc_res.classified_type,
+        "doc_type_confidence": proc_res.classification_confidence,
+        "page_count": proc_res.total_pages,
+        "extraction_method": proc_res.processed_by,
         "pipeline_status": "PROCESSED",
         "entities_extracted": entities,
         "uploaded_at": utcnow_str(),
@@ -1376,8 +1382,8 @@ async def upload_bidder_vault_document(
                 "bid_id": bid_id_str, "bid_package_id": bid_id_str,
                 "filename": safe_name, "original_filename": file.filename,
                 "file_hash": doc_record["file_hash"], "file_size": len(content),
-                "doc_type": final_doc_type, "doc_type_confidence": doc_conf,
-                "page_count": page_count, "extraction_method": method,
+                "doc_type": proc_res.classified_type, "doc_type_confidence": proc_res.classification_confidence,
+                "page_count": proc_res.total_pages, "extraction_method": proc_res.processed_by,
                 "pipeline_status": "PROCESSED", "uploaded_at": utcnow_str(),
             }
             bd_res = await db["documents"].insert_one(bid_doc)
@@ -1390,7 +1396,7 @@ async def upload_bidder_vault_document(
 
     await append_audit_event(
         db, "BIDDER_DOCUMENT_VAULT_UPLOAD", user.get("username", "bidder"),
-        {"doc_type": final_doc_type, "filename": file.filename, "entities": len(entities)},
+        {"doc_type": proc_res.classified_type, "filename": file.filename, "entities": len(entities)},
     )
     return doc_to_dict(doc_record)
 
@@ -1537,30 +1543,36 @@ async def upload_bid_document(bid_id: str, file: UploadFile = File(...), db=Depe
     with open(save_path, "wb") as f:
         f.write(content)
 
-    extracted_text, page_count, method = "", 0, "NONE"
-    if ext.lower() == ".pdf":
-        extracted_text, page_count, method = extract_pdf_text(save_path)
-    elif ext.lower() in (".jpg", ".jpeg", ".png"):
-        method = "TESSERACT"
-        try:
-            import pytesseract, cv2, numpy as np
-            img = cv2.imread(save_path)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-            extracted_text = pytesseract.image_to_string(thresh, config="--oem 3 --psm 6")
-            page_count = 1
-        except Exception as e:
-            logger.warning("Image OCR: %s", e)
+    from app.pipeline.document_processor import BidDocumentProcessor
+    proc_res = await BidDocumentProcessor.process_single_file(
+        file_path_or_bytes=save_path,
+        filename=file.filename,
+        document_id=str(uuid.uuid4()),
+        package_id=bid_id,
+        db=db
+    )
 
-    doc_type, doc_conf = classify_document(extracted_text) if extracted_text else ("UNKNOWN", 0.0)
-    entities = extract_entities(extracted_text, doc_type) if extracted_text else []
+    entities = []
+    for ev in proc_res.extracted_evidence:
+        entities.append({
+            "field": ev.field_name,
+            "raw_value": ev.raw_value,
+            "normalized_value": ev.normalized_value,
+            "confidence": ev.confidence,
+            "extraction_method": proc_res.processed_by,
+            "source_page": ev.page_number,
+            "source_snippet": "",
+            "verification_status": ev.verification_status,
+            "extracted_at": utcnow_str(),
+            "doc_type": proc_res.classified_type,
+        })
 
     doc_record = {
         "bid_id": bid_id, "bid_package_id": bid_id, "filename": safe_name,
         "original_filename": file.filename,
         "file_hash": sha256(content.decode("latin-1", errors="replace")),
-        "file_size": len(content), "doc_type": doc_type, "doc_type_confidence": doc_conf,
-        "page_count": page_count, "extraction_method": method,
+        "file_size": len(content), "doc_type": proc_res.classified_type, "doc_type_confidence": proc_res.classification_confidence,
+        "page_count": proc_res.total_pages, "extraction_method": proc_res.processed_by,
         "pipeline_status": "PROCESSED", "extraction_error": None,
         "uploaded_at": utcnow_str(), "processed_at": utcnow_str(),
     }
@@ -1574,14 +1586,14 @@ async def upload_bid_document(bid_id: str, file: UploadFile = File(...), db=Depe
         evidence_records.append(ev)
 
     await append_audit_event(db, "DOCUMENT_UPLOADED", "system",
-        {"doc_type": doc_type, "filename": file.filename, "entities_extracted": len(entities)}, bid_id)
+        {"doc_type": proc_res.classified_type, "filename": file.filename, "entities_extracted": len(entities)}, bid_id)
 
     return {
         "id": doc_id, "bid_id": bid_id, "bid_package_id": bid_id,
         "filename": safe_name, "original_filename": file.filename,
         "file_hash": doc_record["file_hash"], "file_size": len(content),
-        "doc_type": doc_type, "doc_type_confidence": doc_conf,
-        "page_count": page_count, "extraction_method": method, "pipeline_status": "PROCESSED",
+        "doc_type": proc_res.classified_type, "doc_type_confidence": proc_res.classification_confidence,
+        "page_count": proc_res.total_pages, "extraction_method": proc_res.processed_by, "pipeline_status": "PROCESSED",
         "uploaded_at": utcnow_str(), "processed_at": utcnow_str(),
         "evidence_count": len(evidence_records), "bidder_evidence": evidence_records,
     }

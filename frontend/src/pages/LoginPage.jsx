@@ -85,10 +85,17 @@ export default function LoginPage() {
     setError(null);
     setLoading(true);
     try {
-      await registerBidder({
+      const res = await registerBidder({
         username: regUsername.trim(),
         password: regPassword,
       });
+      dispatch(loginSuccess({
+        token: res.token,
+        role: res.role,
+        name: res.name || res.user?.name,
+        email: res.username || regUsername.trim(),
+        department: res.user?.department || '',
+      }));
       navigate('/my-bids', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');

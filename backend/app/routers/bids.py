@@ -6,7 +6,7 @@ Modular routing for Bids, Document Processing, Evidence, Evaluation, and Officer
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status, Request
 from pydantic import BaseModel
 
 from app.core.database import doc_to_dict, get_db, safe_oid, to_oid, utcnow_str
@@ -90,18 +90,33 @@ async def list_bids(tender_id: Optional[str] = Query(None), db=Depends(get_db)):
 @router.get("/api/v1/bids/mine")
 @router.get("/api/bids/mine")
 @router.get("/bids/mine")
-async def list_my_bids(tender_id: Optional[str] = Query(None), db=Depends(get_db)):
+async def list_my_bids(request: Request, tender_id: Optional[str] = Query(None), db=Depends(get_db)):
     """List bids submitted by current bidder. If tender_id is provided, filter strictly."""
+    from app.main import get_current_user
+    user = await get_current_user(request, db=db)
+    bidder_id = user.get("bidder_id")
+    
+    conds = []
+    if bidder_id:
+        from app.core.database import safe_oid
+        conds.append({
+            "$or": [
+                {"bidder_id": bidder_id},
+                {"bidder_id": safe_oid(bidder_id)},
+            ]
+        })
+
     if tender_id:
         keys = await _resolve_tender_keys(db, tender_id)
-        cursor = db["bids"].find({
+        conds.append({
             "$or": [
                 {"tender_id": {"$in": keys}},
                 {"tender_reference": {"$in": keys}},
             ]
-        }).sort("created_at", -1)
-    else:
-        cursor = db["bids"].find().sort("created_at", -1)
+        })
+
+    query = {"$and": conds} if conds else {}
+    cursor = db["bids"].find(query).sort("created_at", -1)
     bids = await cursor.to_list(100)
     return [doc_to_dict(b) for b in bids]
 
@@ -150,7 +165,7 @@ async def get_bid(bid_id: str, db=Depends(get_db)):
 @router.post("/api/v1/bids", status_code=status.HTTP_201_CREATED)
 @router.post("/api/bids", status_code=status.HTTP_201_CREATED)
 @router.post("/bids", status_code=status.HTTP_201_CREATED)
-async def submit_bid(body: SubmitBidRequest, db=Depends(get_db)):
+async def submit_bid(request: Request, body: SubmitBidRequest, db=Depends(get_db)):
     """Submit a bid for a tender."""
     oid = safe_oid(body.tender_id)
     tender_query = [{"_id": oid}] if oid else []
@@ -167,11 +182,16 @@ async def submit_bid(body: SubmitBidRequest, db=Depends(get_db)):
     tender_id_str = str(tender.get("_id") or tender.get("id") or body.tender_id)
     tender_ref = tender.get("tender_no") or tender.get("reference_number") or tender_id_str
 
+    from app.main import get_current_user
+    user = await get_current_user(request, db=db)
+    user_bidder_id = user.get("bidder_id") or body.bidder_id or "demo_bidder_001"
+    user_bidder_name = user.get("name") or "Bidder Enterprise"
+
     payload = {
         "tender_id": tender_id_str,
         "tender_reference": tender_ref,
-        "bidder_id": body.bidder_id or "demo_bidder_001",
-        "bidder_name": "Adani Total Gas Ltd" if not body.bidder_id else "Bidder Enterprise",
+        "bidder_id": user_bidder_id,
+        "bidder_name": user_bidder_name,
         "bid_amount": body.bid_amount or 14500000.0,
         "status": "SUBMITTED",
         "compliance_status": "PENDING",
